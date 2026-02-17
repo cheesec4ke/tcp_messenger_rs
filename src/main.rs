@@ -279,7 +279,8 @@ fn handle_incoming(
                     ResetColor,
                     Print("> "),
                     SetForegroundColor(DarkGrey),
-                    Print("disconnected\n  input  : ")
+                    Print("disconnected\n  input  : "),
+                    ResetColor,
                 )?;
             } else {
                 print!("\r{time} | <{nick}> disconnected\n  input  : ");
@@ -298,7 +299,8 @@ fn handle_incoming(
                         ResetColor,
                         Print("> "),
                         SetForegroundColor(DarkGrey),
-                        Print("disconnected\n")
+                        Print("disconnected\n"),
+                        ResetColor,
                     )?;
                 } else {
                     log.write(format!("{time} | <{nick}> disconnected\n").as_bytes())?;
