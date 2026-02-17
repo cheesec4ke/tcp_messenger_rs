@@ -173,7 +173,7 @@ fn print_with_time(msg: &String, color: Color, monochrome: &bool) -> std::io::Re
 
 fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::Result<()> {
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
-    let msg = format!("Listening on {addr}");
+    let msg = format!("Listening on {addr}...");
     print_with_time(&msg, DarkGrey, &args.no_color)?;
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
@@ -279,10 +279,10 @@ fn handle_incoming(
                     ResetColor,
                     Print("> "),
                     SetForegroundColor(DarkGrey),
-                    Print("disconnected\n")
+                    Print("disconnected\n  input  : ")
                 )?;
             } else {
-                print!("\r{time} | <{nick}> disconnected\n");
+                print!("\r{time} | <{nick}> disconnected\n  input  : ");
                 stdout.flush()?;
             }
             if let Some(log) = &mut log {
