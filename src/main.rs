@@ -39,6 +39,8 @@ impl Connection {
 pub struct Args {
     #[arg(short = 'p', long, default_value = "32767")]
     listen_port: u16,
+    #[arg(short = 'i', long, default_value = "127.0.0.1")]
+    listen_ip: String,
     #[arg(short, long, default_value = "")]
     nick: String,
     #[arg(long, action, default_value = "false")]
@@ -60,7 +62,7 @@ fn main() -> std::io::Result<()> {
     let mut input = String::new();
     let mut connections: Vec<Connection> = Vec::new();
     let mut msg;
-    let addr = format!("127.0.0.1:{}", args.listen_port);
+    let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let addr = addr.as_str();
 
     if args.log_messages && !exists(&args.log_path)? {
@@ -129,7 +131,7 @@ fn main() -> std::io::Result<()> {
 }
 
 fn listener(args: Arc<Args>) -> std::io::Result<()> {
-    let addr = format!("127.0.0.1:{}", args.listen_port);
+    let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let msg = format!("Listening on {addr}\n");
     execute!(stdout(), SetForegroundColor(Green), Print(msg), ResetColor)?;
     let listener = TcpListener::bind(addr)?;
