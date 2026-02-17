@@ -2,7 +2,7 @@ use std::fs::{exists, File};
 use std::io::{stdin, stdout, BufRead, BufReader, LineWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{spawn};
 use std::time::{Duration, Instant};
 use chrono::Local;
@@ -35,6 +35,10 @@ impl Connection {
     }
 }
 
+struct Connections {
+    connections: Vec<Connection>,
+}
+
 #[derive(Parser)]
 pub struct Args {
     #[arg(short = 'p', long, default_value = "32767")]
@@ -60,7 +64,7 @@ fn main() -> std::io::Result<()> {
     let stdin = stdin();
     let mut stdout = stdout();
     let mut input = String::new();
-    let mut connections: Vec<Connection> = Vec::new();
+    let connections: Arc<Mutex<Connections>> = Arc::new(Mutex::new(Connections { connections: Vec::new() }));
     let mut msg;
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let addr = addr.as_str();
@@ -69,7 +73,8 @@ fn main() -> std::io::Result<()> {
         File::create_new(&args.log_path)?;
     }
 
-    spawn(move || listener(args));
+    let c = connections.clone();
+    spawn(move || listener(args, c));
 
     msg = format!("Connecting to {addr}...\n");
     execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
@@ -79,7 +84,7 @@ fn main() -> std::io::Result<()> {
         if !nick.is_empty() {
             conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
         }
-        connections.push(conn);
+        connections.lock().unwrap().connections.push(conn);
     } else {
         msg = format!("Unable to connect to {addr}\n");
         execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
@@ -95,7 +100,7 @@ fn main() -> std::io::Result<()> {
             _ if input.starts_with("/connect ") || input.starts_with("/c ") => {
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
                 let addr = input.split_whitespace().last().unwrap();
-                if connections.iter().find(|c|
+                if connections.lock().unwrap().connections.iter().find(|c|
                     c.addr == addr.to_string()).is_some() {
                     msg = format!("Already connected to {addr}\n");
                     execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
@@ -108,7 +113,7 @@ fn main() -> std::io::Result<()> {
                         if !nick.is_empty() {
                             conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
                         }
-                        connections.push(conn);
+                        connections.lock().unwrap().connections.push(conn);
                     } else {
                         msg = format!("Unable to connect to {addr}\n");
                         execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
@@ -118,13 +123,13 @@ fn main() -> std::io::Result<()> {
             _ if input.starts_with("/nick ") || input.starts_with("/n ") => {
                 nick = input.split_whitespace().last().unwrap().to_string();
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
-                for conn in &mut connections {
+                for conn in &mut connections.lock().unwrap().connections {
                     conn.stream.write(input.as_bytes())?;
                 }
             }
             _ => {
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
-                for conn in &mut connections {
+                for conn in &mut connections.lock().unwrap().connections {
                     conn.stream.write(input.as_bytes())?;
                 }
             }
@@ -132,7 +137,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-fn listener(args: Arc<Args>) -> std::io::Result<()> {
+fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::Result<()> {
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let msg = format!("Listening on {addr}\n");
     execute!(stdout(), SetForegroundColor(Green), Print(msg), ResetColor)?;
@@ -140,7 +145,14 @@ fn listener(args: Arc<Args>) -> std::io::Result<()> {
     for stream in listener.incoming() {
         let s = stream?;
         let a = args.clone();
-        spawn( || {
+        let c = connections.clone();
+        spawn( move || {
+            c.lock().unwrap().connections.push(
+                Connection {
+                    addr: s.peer_addr().unwrap().to_string(),
+                    stream: LineWriter::new(s.try_clone().unwrap()),
+                }
+            );
             handle_incoming(s, a).unwrap();
         });
     }
