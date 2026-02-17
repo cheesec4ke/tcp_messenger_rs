@@ -174,7 +174,7 @@ fn print_with_time(msg: &String, color: Color, monochrome: &bool) -> std::io::Re
 fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::Result<()> {
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let msg = format!("Listening on {addr}");
-    print_with_time(&msg, Green, &args.no_color)?;
+    print_with_time(&msg, DarkGrey, &args.no_color)?;
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
         let mut s = stream?;
@@ -266,6 +266,45 @@ fn handle_incoming(
                 .unwrap()
                 .connections
                 .retain(|s| s.peer_addr().unwrap() != stream.peer_addr().unwrap());
+            if !args.no_color {
+                execute!(
+                    stdout,
+                    cursor::MoveToColumn(0),
+                    SetForegroundColor(DarkGrey),
+                    Print(&time),
+                    ResetColor,
+                    Print(" | <"),
+                    SetForegroundColor(color),
+                    Print(&nick),
+                    ResetColor,
+                    Print("> "),
+                    SetForegroundColor(DarkGrey),
+                    Print("disconnected\n")
+                )?;
+            } else {
+                print!("\r{time} | <{nick}> disconnected\n");
+                stdout.flush()?;
+            }
+            if let Some(log) = &mut log {
+                if args.color_logs {
+                    execute!(
+                        log,
+                        SetForegroundColor(DarkGrey),
+                        Print(&time),
+                        ResetColor,
+                        Print(" | <"),
+                        SetForegroundColor(color),
+                        Print(&nick),
+                        ResetColor,
+                        Print("> "),
+                        SetForegroundColor(DarkGrey),
+                        Print("disconnected\n")
+                    )?;
+                } else {
+                    log.write(format!("{time} | <{nick}> disconnected\n").as_bytes())?;
+                }
+            }
+
             return Ok(());
         }
         line = line.trim().to_string();
