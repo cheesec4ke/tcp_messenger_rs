@@ -200,6 +200,9 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
     loop {
         line.clear();
         reader.read_line(&mut line)?;
+        if line.is_empty() {
+            return Ok(())
+        }
         line = line.trim().to_string();
         time = Local::now().format("%H:%M:%S");
         match line {
