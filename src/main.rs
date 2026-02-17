@@ -13,9 +13,10 @@ use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::style::Color::*;
 use crossterm::terminal::ClearType::CurrentLine;
 
+#[derive(Debug)]
 struct Connection {
-    addr: String,
-    stream: LineWriter<TcpStream>,
+    stream: TcpStream,
+    writer: LineWriter<TcpStream>,
 }
 
 impl Connection {
@@ -24,8 +25,8 @@ impl Connection {
         loop {
             if let Ok(stream) = TcpStream::connect(addr) {
                 return Some(Self {
-                    addr: addr.to_string(),
-                    stream: LineWriter::new(stream),
+                    stream: stream.try_clone().unwrap(),
+                    writer: LineWriter::new(stream),
                 })
             }
             if now.elapsed() > timeout {
@@ -35,8 +36,9 @@ impl Connection {
     }
 }
 
+#[derive(Debug)]
 struct Connections {
-    connections: Vec<Connection>,
+    connections: Vec<Connection>
 }
 
 #[derive(Parser)]
@@ -74,7 +76,8 @@ fn main() -> std::io::Result<()> {
     }
 
     let c = connections.clone();
-    spawn(move || listener(args, c));
+    let a = args.clone();
+    spawn(move || listener(a, c));
 
     msg = format!("Connecting to {addr}...\n");
     execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
@@ -101,7 +104,7 @@ fn main() -> std::io::Result<()> {
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
                 let addr = input.split_whitespace().last().unwrap();
                 if connections.lock().unwrap().connections.iter().find(|c|
-                    c.addr == addr.to_string()).is_some() {
+                    c.stream.peer_addr().unwrap().to_string() == addr).is_some() {
                     msg = format!("Already connected to {addr}\n");
                     execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
                 } else {
@@ -113,6 +116,9 @@ fn main() -> std::io::Result<()> {
                         if !nick.is_empty() {
                             conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
                         }
+                        let a = args.clone();
+                        let s = conn.stream.try_clone()?;
+                        spawn(|| { handle_incoming(s, a).unwrap(); });
                         connections.lock().unwrap().connections.push(conn);
                     } else {
                         msg = format!("Unable to connect to {addr}\n");
@@ -124,13 +130,13 @@ fn main() -> std::io::Result<()> {
                 nick = input.split_whitespace().last().unwrap().to_string();
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.stream.write(input.as_bytes())?;
+                    conn.writer.write(input.as_bytes())?;
                 }
             }
             _ => {
                 execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.stream.write(input.as_bytes())?;
+                    conn.writer.write(input.as_bytes())?;
                 }
             }
         }
@@ -149,8 +155,8 @@ fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::R
         spawn( move || {
             c.lock().unwrap().connections.push(
                 Connection {
-                    addr: s.peer_addr().unwrap().to_string(),
-                    stream: LineWriter::new(s.try_clone().unwrap()),
+                    stream: s.try_clone().unwrap(),
+                    writer: LineWriter::new(s.try_clone().unwrap()),
                 }
             );
             handle_incoming(s, a).unwrap();
