@@ -1,44 +1,20 @@
+use chrono::Local;
+use clap::Parser;
+use crossterm::style::Color::*;
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use crossterm::terminal::ClearType::CurrentLine;
+use crossterm::{cursor, execute, terminal};
 use std::fs::{exists, File};
 use std::io::{stdin, stdout, BufRead, BufReader, LineWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
-use std::thread::{spawn};
+use std::thread::spawn;
 use std::time::{Duration, Instant};
-use chrono::Local;
-use clap::Parser;
-use crossterm::cursor::{MoveToPreviousLine};
-use crossterm::{execute, terminal};
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
-use crossterm::style::Color::*;
-use crossterm::terminal::ClearType::CurrentLine;
-
-#[derive(Debug)]
-struct Connection {
-    stream: TcpStream,
-    writer: LineWriter<TcpStream>,
-}
-
-impl Connection {
-    fn connect(addr: &str, timeout: Duration) -> Option<Connection> {
-        let now = Instant::now();
-        loop {
-            if let Ok(stream) = TcpStream::connect(addr) {
-                return Some(Self {
-                    stream: stream.try_clone().unwrap(),
-                    writer: LineWriter::new(stream),
-                })
-            }
-            if now.elapsed() > timeout {
-                return None;
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 struct Connections {
-    connections: Vec<Connection>
+    connections: Vec<TcpStream>,
 }
 
 #[derive(Parser)]
@@ -54,7 +30,7 @@ pub struct Args {
     #[arg(short, long, action, default_value = "false")]
     log_messages: bool,
     #[arg(long, action, default_value = "false")]
-    colored_logs: bool,
+    color_logs: bool,
     #[arg(long, default_value = "./messages.log")]
     log_path: String,
 }
@@ -66,7 +42,9 @@ fn main() -> std::io::Result<()> {
     let stdin = stdin();
     let mut stdout = stdout();
     let mut input = String::new();
-    let connections: Arc<Mutex<Connections>> = Arc::new(Mutex::new(Connections { connections: Vec::new() }));
+    let connections: Arc<Mutex<Connections>> = Arc::new(Mutex::new(Connections {
+        connections: Vec::new(),
+    }));
     let mut msg;
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let addr = addr.as_str();
@@ -75,22 +53,25 @@ fn main() -> std::io::Result<()> {
         File::create_new(&args.log_path)?;
     }
 
+    execute!(stdout, cursor::EnableBlinking, ResetColor)?;
+
     let c = connections.clone();
     let a = args.clone();
     spawn(move || listener(a, c));
 
-    msg = format!("Connecting to {addr}...\n");
-    execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
-    if let Some(mut conn) = Connection::connect(addr, TIMEOUT) {
-        msg = format!("Successfully connected to {addr}\n");
-        execute!(stdout, SetForegroundColor(Green), Print(&msg), ResetColor)?;
+    msg = format!("Connecting to {addr}...");
+    print_with_time(&msg, DarkGrey, &args.no_color)?;
+    if let Some(mut conn) = connect(addr, TIMEOUT) {
+        msg = format!("Successfully connected to {addr}");
+        print_with_time(&msg, Green, &args.no_color)?;
         if !nick.is_empty() {
-            conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
+            conn.write_all(format!("/nick {nick}\n").as_str().as_bytes())?;
+            conn.flush()?;
         }
         connections.lock().unwrap().connections.push(conn);
     } else {
-        msg = format!("Unable to connect to {addr}\n");
-        execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
+        msg = format!("Unable to connect to {addr}");
+        print_with_time(&msg, Red, &args.no_color)?;
     }
 
     loop {
@@ -101,71 +82,121 @@ fn main() -> std::io::Result<()> {
                 exit(0);
             }
             _ if input.starts_with("/connect ") || input.starts_with("/c ") => {
-                execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
+                execute!(
+                    stdout,
+                    cursor::MoveToPreviousLine(1),
+                    terminal::Clear(CurrentLine)
+                )?;
                 let addr = input.split_whitespace().last().unwrap();
-                if connections.lock().unwrap().connections.iter().find(|c|
-                    c.stream.peer_addr().unwrap().to_string() == addr).is_some() {
-                    msg = format!("Already connected to {addr}\n");
-                    execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
+                if connections
+                    .lock()
+                    .unwrap()
+                    .connections
+                    .iter()
+                    .find(|c| c.peer_addr().unwrap().to_string() == addr)
+                    .is_some()
+                {
+                    msg = format!("Already connected to {addr}");
+                    print_with_time(&msg, Red, &args.no_color)?;
                 } else {
-                    msg = format!("Connecting to {addr}...\n");
-                    execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
-                    if let Some(mut conn) = Connection::connect(addr, TIMEOUT) {
-                        msg = format!("Successfully connected to {addr}\n");
-                        execute!(stdout, SetForegroundColor(Green), Print(&msg), ResetColor)?;
+                    msg = format!("Connecting to {addr}...");
+                    print_with_time(&msg, DarkGrey, &args.no_color)?;
+                    if let Some(mut conn) = connect(addr, TIMEOUT) {
+                        msg = format!("Successfully connected to {addr}");
+                        print_with_time(&msg, Green, &args.no_color)?;
                         if !nick.is_empty() {
-                            conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
+                            conn.write_all(format!("/nick {nick}\n").as_str().as_bytes())?;
+                            conn.flush()?;
                         }
                         let a = args.clone();
-                        let s = conn.stream.try_clone()?;
-                        spawn(|| { handle_incoming(s, a).unwrap(); });
+                        let s = conn.try_clone()?;
+                        let c = connections.clone();
+                        spawn(|| {
+                            handle_incoming(s, a, c).unwrap();
+                        });
                         connections.lock().unwrap().connections.push(conn);
                     } else {
-                        msg = format!("Unable to connect to {addr}\n");
-                        execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
+                        msg = format!("Unable to connect to {addr}");
+                        print_with_time(&msg, Red, &args.no_color)?;
                     }
                 }
             }
             _ if input.starts_with("/nick ") || input.starts_with("/n ") => {
                 nick = input.split_whitespace().last().unwrap().to_string();
-                execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
+                execute!(
+                    stdout,
+                    cursor::MoveToPreviousLine(1),
+                    terminal::Clear(CurrentLine)
+                )?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.writer.write(input.as_bytes())?;
+                    conn.write_all(input.as_bytes())?;
+                    conn.flush()?;
                 }
             }
             _ => {
-                execute!(stdout, MoveToPreviousLine(1), terminal::Clear(CurrentLine))?;
+                execute!(
+                    stdout,
+                    cursor::MoveToPreviousLine(1),
+                    terminal::Clear(CurrentLine)
+                )?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.writer.write(input.as_bytes())?;
+                    conn.write_all(input.as_bytes())?;
+                    conn.flush()?;
                 }
             }
         }
     }
 }
 
+fn print_with_time(msg: &String, color: Color, monochrome: &bool) -> std::io::Result<()> {
+    let mut stdout = stdout();
+    let time = Local::now().format("%H:%M:%S");
+    if !monochrome {
+        execute!(
+            stdout,
+            cursor::MoveToColumn(0),
+            SetForegroundColor(DarkGrey),
+            Print(time),
+            ResetColor,
+            Print(" | "),
+            SetForegroundColor(color),
+            Print(msg),
+            ResetColor,
+            Print("\n  input  : ")
+        )?;
+    } else {
+        print!("\r{} | {}\n  input  : ", time, msg);
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
 fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::Result<()> {
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
-    let msg = format!("Listening on {addr}\n");
-    execute!(stdout(), SetForegroundColor(Green), Print(msg), ResetColor)?;
+    let msg = format!("Listening on {addr}");
+    print_with_time(&msg, Green, &args.no_color)?;
     let listener = TcpListener::bind(addr)?;
     for stream in listener.incoming() {
-        let s = stream?;
+        let mut s = stream?;
         let a = args.clone();
         let c = connections.clone();
-        spawn( move || {
-            c.lock().unwrap().connections.push(
-                Connection {
-                    stream: s.try_clone().unwrap(),
-                    writer: LineWriter::new(s.try_clone().unwrap()),
-                }
-            );
-            handle_incoming(s, a).unwrap();
+        if !args.nick.is_empty() {
+            s.write_all(format!("/nick {}\n", args.nick).as_str().as_bytes())?;
+            s.flush()?;
+        }
+        spawn(move || {
+            c.lock().unwrap().connections.push(s.try_clone().unwrap());
+            handle_incoming(s, a, c).unwrap();
         });
     }
     Ok(())
 }
 
-fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
+fn handle_incoming(
+    stream: TcpStream,
+    args: Arc<Args>,
+    connections: Arc<Mutex<Connections>>,
+) -> std::io::Result<()> {
     let mut stdout = stdout();
     let peer_addr = stream.peer_addr()?.to_string();
     let mut reader = BufReader::new(&stream);
@@ -174,7 +205,12 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
     let color = random_color();
     let mut time = Local::now().format("%H:%M:%S");
     let mut log: Option<LineWriter<File>> = if args.log_messages {
-        Some(LineWriter::new(File::options().write(true).append(true).open(&*args.log_path)?))
+        Some(LineWriter::new(
+            File::options()
+                .write(true)
+                .append(true)
+                .open(&*args.log_path)?,
+        ))
     } else {
         None
     };
@@ -182,6 +218,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
     if !args.no_color {
         execute!(
             stdout,
+            cursor::MoveToColumn(0),
             SetForegroundColor(DarkGrey),
             Print(&time),
             ResetColor,
@@ -193,13 +230,14 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
             SetForegroundColor(color),
             Print(&nick),
             ResetColor,
-            Print(">\n")
+            Print(">\n  input  : "),
         )?;
     } else {
-        println!("{time} | Accepted connection from <{nick}>");
+        print!("\r{time} | Accepted connection from <{nick}>\n  input  : ");
+        stdout.flush()?;
     }
     if let Some(log) = &mut log {
-        if args.colored_logs {
+        if args.color_logs {
             execute!(
                 log,
                 SetForegroundColor(DarkGrey),
@@ -211,7 +249,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                 ResetColor,
                 Print("> "),
                 SetForegroundColor(Green),
-                Print(" joined\n"),
+                Print("joined\n"),
                 ResetColor,
             )?;
         } else {
@@ -238,6 +276,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                 if !args.no_color {
                     execute!(
                         stdout,
+                        cursor::MoveToColumn(0),
                         SetForegroundColor(DarkGrey),
                         Print(&time),
                         ResetColor,
@@ -253,13 +292,14 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                         SetForegroundColor(color),
                         Print(&new_nick),
                         ResetColor,
-                        Print(">\n"),
+                        Print(">\n  input  : "),
                     )?;
                 } else {
-                    println!("{time} | <{nick}> changed nickname to <{new_nick}>");
+                    print!("\r{time} | <{nick}> changed nickname to <{new_nick}>\n  input  : ");
+                    stdout.flush()?;
                 }
                 if let Some(log) = &mut log {
-                    if args.colored_logs {
+                    if args.color_logs {
                         execute!(
                             log,
                             SetForegroundColor(DarkGrey),
@@ -289,6 +329,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                 if !args.no_color {
                     execute!(
                         stdout,
+                        cursor::MoveToColumn(0),
                         SetForegroundColor(DarkGrey),
                         Print(&time),
                         ResetColor,
@@ -298,13 +339,14 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                         ResetColor,
                         Print("> "),
                         Print(&line),
-                        Print("\n")
+                        Print("\n  input  : ")
                     )?;
                 } else {
-                    println!("{time} | <{nick}> {line}")
+                    print!("\r{time} | <{nick}> {line}\n  input  : ");
+                    stdout.flush()?;
                 }
                 if let Some(log) = &mut log {
-                    if args.colored_logs {
+                    if args.color_logs {
                         execute!(
                             log,
                             SetForegroundColor(DarkGrey),
@@ -327,8 +369,33 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
     }
 }
 
+fn connect(addr: &str, timeout: Duration) -> Option<TcpStream> {
+    let now = Instant::now();
+    loop {
+        if let Ok(stream) = TcpStream::connect(addr) {
+            return Some(stream);
+        }
+        if now.elapsed() > timeout {
+            return None;
+        }
+    }
+}
+
 fn random_color() -> Color {
-    let colors = [Red, Green, Yellow, Blue, Magenta, Cyan, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan];
+    let colors = [
+        Red,
+        Green,
+        Yellow,
+        Blue,
+        Magenta,
+        Cyan,
+        DarkRed,
+        DarkGreen,
+        DarkYellow,
+        DarkBlue,
+        DarkMagenta,
+        DarkCyan,
+    ];
     colors[fastrand::usize(0..12)]
 }
 
