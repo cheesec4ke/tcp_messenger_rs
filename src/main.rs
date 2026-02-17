@@ -279,8 +279,9 @@ fn handle_incoming(
                     ResetColor,
                     Print("> "),
                     SetForegroundColor(DarkGrey),
-                    Print("disconnected\n  input  : "),
+                    Print("disconnected"),
                     ResetColor,
+                    Print("\n  input  : "),
                 )?;
             } else {
                 print!("\r{time} | <{nick}> disconnected\n  input  : ");
