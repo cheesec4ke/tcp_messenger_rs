@@ -75,12 +75,14 @@ fn main() -> std::io::Result<()> {
     execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
     if let Some(mut conn) = Connection::connect(addr, TIMEOUT) {
         msg = format!("Successfully connected to {addr}\n");
-        execute!(stdout, SetForegroundColor(Green), Print(&msg))?;
-        conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
+        execute!(stdout, SetForegroundColor(Green), Print(&msg), ResetColor)?;
+        if !nick.is_empty() {
+            conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
+        }
         connections.push(conn);
     } else {
         msg = format!("Unable to connect to {addr}\n");
-        execute!(stdout, SetForegroundColor(Red), Print(&msg))?;
+        execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
     }
 
     loop {
@@ -96,20 +98,20 @@ fn main() -> std::io::Result<()> {
                 if connections.iter().find(|c|
                     c.addr == addr.to_string()).is_some() {
                     msg = format!("Already connected to {addr}\n");
-                    execute!(stdout, SetForegroundColor(Red), Print(&msg))?;
+                    execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
                 } else {
                     msg = format!("Connecting to {addr}...\n");
                     execute!(stdout, SetForegroundColor(DarkGrey), Print(&msg))?;
                     if let Some(mut conn) = Connection::connect(addr, TIMEOUT) {
                         msg = format!("Successfully connected to {addr}\n");
-                        execute!(stdout, SetForegroundColor(Green), Print(&msg))?;
+                        execute!(stdout, SetForegroundColor(Green), Print(&msg), ResetColor)?;
                         if !nick.is_empty() {
                             conn.stream.write(format!("/nick {nick}\n").as_str().as_bytes())?;
                         }
                         connections.push(conn);
                     } else {
                         msg = format!("Unable to connect to {addr}\n");
-                        execute!(stdout, SetForegroundColor(Red), Print(&msg))?;
+                        execute!(stdout, SetForegroundColor(Red), Print(&msg), ResetColor)?;
                     }
                 }
             }
