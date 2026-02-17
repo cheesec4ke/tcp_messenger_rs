@@ -41,11 +41,11 @@ pub struct Args {
     listen_port: u16,
     #[arg(short, long, default_value = "")]
     nick: String,
-    #[arg(short, long, default_value = "true")]
-    color: bool,
-    #[arg(short, long, default_value = "false")]
+    #[arg(long, action, default_value = "false")]
+    no_color: bool,
+    #[arg(short, long, action, default_value = "false")]
     log_messages: bool,
-    #[arg(long, default_value = "false")]
+    #[arg(long, action, default_value = "false")]
     colored_logs: bool,
     #[arg(long, default_value = "./messages.log")]
     log_path: String,
@@ -157,7 +157,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
         None
     };
 
-    if args.color {
+    if !args.no_color {
         execute!(
             stdout,
             SetForegroundColor(DarkGrey),
@@ -205,7 +205,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
         match line {
             _ if line.starts_with("/nick ") || line.starts_with("/n ") => {
                 let new_nick = line.split_whitespace().last().unwrap().to_string();
-                if args.color {
+                if !args.no_color {
                     execute!(
                         stdout,
                         SetForegroundColor(DarkGrey),
@@ -256,7 +256,7 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
                 nick = new_nick;
             }
             _ => {
-                if args.color {
+                if !args.no_color {
                     execute!(
                         stdout,
                         SetForegroundColor(DarkGrey),
