@@ -305,8 +305,8 @@ fn handle_incoming(stream: TcpStream, args: Arc<Args>) -> std::io::Result<()> {
 }
 
 fn random_color() -> Color {
-    let colors = [DarkGrey, Red, Green, Yellow, Blue, Magenta, Cyan, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan];
-    colors[fastrand::usize(0..14)]
+    let colors = [Red, Green, Yellow, Blue, Magenta, Cyan, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan];
+    colors[fastrand::usize(0..12)]
 }
 
 //todo: encrypt messages
