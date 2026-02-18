@@ -10,7 +10,7 @@ use crossterm::style::Color::*;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::ClearType::CurrentLine;
 use crossterm::{cursor, execute, terminal};
-use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::fs::{exists, File};
 use std::io::{stdin, stdout, LineWriter, Read, Write};
@@ -123,7 +123,7 @@ fn main() -> std::io::Result<()> {
                     print_with_time(&format!("Failed to bind to {addr}"), Red, &args.no_color)?;
                 }
             }
-            _ if input.starts_with("/list_peers") || input.starts_with("/lp") => {
+            "/list_peers\n" | "/lp\n" => {
                 let conns = connections.connections.lock().unwrap();
                 if conns.len() == 0 {
                     print_with_time("No peers connected", Red, &args.no_color)?;
@@ -497,5 +497,5 @@ fn random_color() -> Color {
         DarkMagenta,
         DarkCyan,
     ];
-    colors[fastrand::usize(0..12)]
+    colors[OsRng.next_u32() as usize % 12]
 }
