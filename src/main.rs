@@ -1,5 +1,8 @@
-use chacha20poly1305::aead::{Aead, OsRng};
-use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce};
+mod connections;
+mod encryption;
+
+use crate::connections::{Connection, Connections};
+use crate::encryption::{decrypt, encrypt};
 use chrono::Local;
 use clap::Parser;
 use crossterm::style::Color::*;
@@ -8,13 +11,10 @@ use crossterm::terminal::ClearType::CurrentLine;
 use crossterm::{cursor, execute, terminal};
 use std::fs::{exists, File};
 use std::io::{stdin, stdout, BufReader, LineWriter, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
-use std::time::{Duration, Instant};
-
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Parser)]
 struct Args {
@@ -34,185 +34,6 @@ struct Args {
     log_path: String,
     #[arg(long, short, num_args = 0.., value_delimiter = ',')]
     startup_connections: Vec<String>,
-}
-
-struct Connections {
-    connections: Mutex<Vec<Connection>>,
-}
-impl Connections {
-    fn set_nick(&self, nick: &String) -> std::io::Result<()> {
-        for conn in self.connections.lock().unwrap().iter_mut() {
-            conn.set_nick(nick)?;
-        }
-        Ok(())
-    }
-
-    fn set_peer_nick(&self, peer_addr: &str, nick: &str) {
-        if let Some(index) = self.ip_position(peer_addr) {
-            self.connections.lock().unwrap()[index]
-                .peer_nick
-                .clone_from(&nick.to_string());
-        }
-    }
-
-    fn send_msg(&self, msg: &String) -> std::io::Result<()> {
-        for conn in self.connections.lock().unwrap().iter_mut() {
-            conn.send_msg(msg)?;
-        }
-        Ok(())
-    }
-
-    fn disconnect(&self, peer_addr: &str) -> bool {
-        let mut disconnected = false;
-        self.connections.lock().unwrap().retain_mut(|s| {
-            if let Ok(a) = s.stream.peer_addr() {
-                if a.to_string() != *peer_addr {
-                    true
-                } else {
-                    s.stream.shutdown(Shutdown::Both).unwrap();
-                    disconnected = true;
-                    false
-                }
-            } else {
-                disconnected = true;
-                false
-            }
-        });
-        disconnected
-    }
-
-    /*fn get_addr(&self, nick: &String) -> Option<String> {
-        if let Some(index) = self.nick_position(nick) {
-            Some(
-                self.connections.lock().unwrap()[index]
-                    .stream
-                    .peer_addr()
-                    .unwrap()
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    }*/
-
-    fn ip_position(&self, ip: &str) -> Option<usize> {
-        self.connections
-            .lock()
-            .unwrap()
-            .iter()
-            .position(|c| c.stream.peer_addr().unwrap().to_string().eq(ip))
-    }
-
-    /*fn nick_position(&self, nick: &str) -> Option<usize> {
-        self.connections
-            .lock()
-            .unwrap()
-            .iter()
-            .position(|c| c.peer_nick.eq(nick))
-    }*/
-
-    fn new_connection(
-        &self,
-        connections: Arc<Self>,
-        addr: &str,
-        nick: &String,
-        args: Arc<Args>,
-        send_only: bool,
-    ) -> std::io::Result<()> {
-        let mut msg: String;
-        if self.ip_position(&addr).is_some() {
-            msg = format!("Already connected to {addr}");
-            print_with_time(&msg, Red, &args.no_color)?;
-        } else {
-            msg = format!("Connecting to {addr}...");
-            print_with_time(&msg, DarkGrey, &args.no_color)?;
-            if let Some(stream) = connect(addr) {
-                let mut connection = Connection::from_tcp_stream(stream);
-                connection.set_nick(&nick)?;
-                self.connections.lock().unwrap().push(connection);
-                if !send_only {
-                    let a = args.clone();
-                    let c = self
-                        .connections
-                        .lock()
-                        .unwrap()
-                        .last()
-                        .unwrap()
-                        .try_clone()?;
-                    let conns = connections.clone();
-                    spawn(|| {
-                        handle_incoming(c, a, conns).unwrap();
-                    });
-                }
-                msg = format!("Connected to {addr}");
-                print_with_time(&msg, DarkGrey, &args.no_color)?;
-            } else {
-                msg = format!("Unable to connect to {addr}");
-                print_with_time(&msg, Red, &args.no_color)?;
-            }
-        }
-
-        return Ok(());
-
-        fn connect(addr: &str) -> Option<TcpStream> {
-            let now = Instant::now();
-            loop {
-                if let Ok(stream) = TcpStream::connect(addr) {
-                    return Some(stream);
-                }
-                if now.elapsed() > CONNECTION_TIMEOUT {
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-struct Connection {
-    stream: TcpStream,
-    peer_nick: String,
-    peer_color: Color,
-}
-impl Connection {
-    fn from_tcp_stream(stream: TcpStream) -> Connection {
-        Self {
-            peer_nick: stream.peer_addr().unwrap().to_string(),
-            stream,
-            peer_color: random_color(),
-        }
-    }
-
-    fn try_clone(&self) -> std::io::Result<Connection> {
-        match self.stream.try_clone() {
-            Ok(stream) => Ok(Self {
-                stream,
-                peer_nick: self.peer_nick.clone(),
-                peer_color: self.peer_color.clone(),
-            }),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn send_msg(&mut self, msg: &String) -> std::io::Result<()> {
-        let encrypted = encrypt(msg).unwrap();
-        self.stream.write_all(encrypted.as_slice())?;
-        self.stream.flush()?;
-        Ok(())
-    }
-
-    /*fn send_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.stream.write_all(bytes)?;
-        self.stream.flush()?;
-        Ok(())
-    }*/
-
-    fn set_nick(&mut self, nick: &String) -> std::io::Result<()> {
-        if !nick.is_empty() {
-            let msg = format!("/nick {nick}\n");
-            self.send_msg(&msg)?;
-        }
-        Ok(())
-    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -637,35 +458,4 @@ fn random_color() -> Color {
         DarkCyan,
     ];
     colors[fastrand::usize(0..12)]
-}
-
-fn encrypt(string: &String) -> Option<Vec<u8>> {
-    let key = ChaCha20Poly1305::generate_key(&mut OsRng);
-    let cipher = ChaCha20Poly1305::new(&key);
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-    match cipher.encrypt(&nonce, string.as_bytes()) {
-        Ok(e) => {
-            let mut encrypted = Vec::from(key.as_slice());
-            encrypted.extend_from_slice(&nonce);
-            encrypted.extend_from_slice(&e);
-            let mut output = Vec::from(encrypted.len().to_be_bytes());
-            output.extend_from_slice(encrypted.as_slice());
-            Some(output)
-        }
-        Err(_) => None,
-    }
-}
-
-fn decrypt(bytes: &[u8]) -> Option<String> {
-    let key = Key::from_slice(&bytes[0..32]);
-    let cipher = ChaCha20Poly1305::new(&key);
-    let nonce = Nonce::from_slice(&bytes[32..44]);
-    let text = &bytes[44..];
-    match cipher.decrypt(&nonce, text) {
-        Ok(d) => {
-            let decrypted = String::from_utf8(d).unwrap();
-            Some(decrypted)
-        }
-        Err(_) => None,
-    }
 }
