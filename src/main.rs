@@ -68,16 +68,16 @@ fn main() -> std::io::Result<()> {
         args.clone(),
         true,
         true,
-    )?;
+    );
     for addr in &args.startup_connections {
-        connections.new_connection(
+        let _local_addr = connections.new_connection(
             connections.clone(),
             addr,
             &nick.lock().unwrap(),
             args.clone(),
             false,
             false,
-        )?;
+        );
     }
 
     loop {
@@ -95,14 +95,14 @@ fn main() -> std::io::Result<()> {
             }
             _ if input.starts_with("/connect ") || input.starts_with("/c ") => {
                 let addr = input.split_whitespace().last().unwrap();
-                connections.new_connection(
+                let _local_addr = connections.new_connection(
                     connections.clone(),
                     addr,
                     &nick.lock().unwrap(),
                     args.clone(),
                     false,
                     false,
-                )?;
+                );
             }
             _ if input.starts_with("/disconnect ") || input.starts_with("/dc ") => {
                 let addr = input.split_whitespace().last().unwrap();
