@@ -3,18 +3,22 @@ mod encryption;
 
 use crate::connections::{Connection, Connections};
 use crate::encryption::{decrypt, encrypt};
+use chacha20poly1305::aead::OsRng;
 use chrono::Local;
 use clap::Parser;
 use crossterm::style::Color::*;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::ClearType::CurrentLine;
 use crossterm::{cursor, execute, terminal};
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use std::fs::{exists, File};
-use std::io::{stdin, stdout, BufReader, LineWriter, Read, Write};
+use std::io::{stdin, stdout, LineWriter, Read, Write};
 use std::net::TcpListener;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 #[derive(Parser)]
 struct Args {
@@ -57,19 +61,21 @@ fn main() -> std::io::Result<()> {
     listen_addr = listener.local_addr()?.to_string();
     spawn_listener(listener, args.clone(), connections.clone(), nick.clone());
 
-    connections.new_connection(
+    let _local_addr = connections.new_connection(
         connections.clone(),
         &listen_addr,
         &args.nick,
         args.clone(),
         true,
+        true,
     )?;
-    for connection in &args.startup_connections {
+    for addr in &args.startup_connections {
         connections.new_connection(
             connections.clone(),
-            connection,
+            addr,
             &nick.lock().unwrap(),
             args.clone(),
+            false,
             false,
         )?;
     }
@@ -95,11 +101,12 @@ fn main() -> std::io::Result<()> {
                     &nick.lock().unwrap(),
                     args.clone(),
                     false,
+                    false,
                 )?;
             }
             _ if input.starts_with("/disconnect ") || input.starts_with("/dc ") => {
                 let addr = input.split_whitespace().last().unwrap();
-                let disconnected = connections.disconnect(addr);
+                let disconnected = connections.disconnect(addr, true);
                 if disconnected {
                     //let msg = format!("Disconnected from {addr}");
                     //print_with_time(&msg, DarkGrey, &args.no_color)?;
@@ -180,15 +187,29 @@ fn spawn_listener(
     spawn(move || -> std::io::Result<()> {
         let addr = listener.local_addr()?;
         print_with_time(&format!("Listening on {addr}..."), DarkGrey, &args.no_color)?;
+        let mut first = true;
         for stream in listener.incoming() {
             let s = stream?;
+            let p = s.peer_addr()?.to_string();
             let mut conn = Connection::from_tcp_stream(s);
+            if first {
+                conn.local = true;
+                first = false;
+            }
+            let es = EphemeralSecret::random_from_rng(OsRng);
+            let pk = PublicKey::from(&es);
+            conn.send_bytes(pk.as_bytes())?;
+            let mut buf = [0u8; 32];
+            conn.stream.read_exact(&mut buf)?;
+            conn.secret = es.diffie_hellman(&PublicKey::from(buf)).to_bytes();
+            conn.csprng = ChaCha20Rng::from_seed(conn.secret);
+            conn.csprng.set_word_pos(0);
             conn.set_nick(&nick.lock().unwrap())?;
             let a = args.clone();
             let c = connections.clone();
-            c.connections.lock().unwrap().push(conn.try_clone()?);
+            c.connections.lock().unwrap().push(conn);
             spawn(move || {
-                handle_incoming(conn, a, c).unwrap();
+                handle_incoming(&p, a, c).unwrap();
             });
         }
         Ok(())
@@ -196,18 +217,14 @@ fn spawn_listener(
 }
 
 fn handle_incoming(
-    conn: Connection,
+    peer_addr: &str,
     args: Arc<Args>,
     connections: Arc<Connections>,
 ) -> std::io::Result<()> {
     let mut stdout = stdout();
-    let peer_addr = conn.stream.peer_addr()?.to_string();
-    let mut nick = conn.peer_nick;
-    let mut reader = BufReader::new(conn.stream);
     let mut msg_len: [u8; 8];
     let mut line: String;
     let mut buf = Vec::new();
-    let color = conn.peer_color;
     let mut time = Local::now().format("%H:%M:%S");
     let mut log: Option<LineWriter<File>> = if args.log_messages {
         Some(LineWriter::new(
@@ -219,6 +236,15 @@ fn handle_incoming(
     } else {
         None
     };
+
+    let addr_position = connections.addr_position(peer_addr).unwrap();
+    let mut conns = connections.connections.lock().unwrap();
+    let secret = conns[addr_position].secret.clone();
+    let mut nick = conns[addr_position].peer_nick.clone();
+    let color = conns[addr_position].peer_color.clone();
+    let mut stream = conns[addr_position].stream.try_clone()?;
+    conns[addr_position].messages_sent = 0;
+    drop(conns);
 
     if !args.no_color {
         execute!(
@@ -264,8 +290,8 @@ fn handle_incoming(
 
     loop {
         msg_len = [0u8; 8];
-        if let Err(_) = reader.read_exact(&mut msg_len) {
-            connections.disconnect(&peer_addr);
+        if let Err(_) = stream.read_exact(&mut msg_len) {
+            connections.disconnect(&peer_addr, true);
             if !args.no_color {
                 execute!(
                     stdout,
@@ -307,13 +333,27 @@ fn handle_incoming(
                     log.write(format!("{time} | <{nick}> disconnected\n").as_bytes())?;
                 }
             }
-
             return Ok(());
         }
         buf.clear();
         buf.resize(u64::from_be_bytes(msg_len) as usize, 0);
-        reader.read_exact(&mut buf)?;
-        line = decrypt(&buf).unwrap();
+        stream.read_exact(&mut buf)?;
+        /*unsafe {
+            print_with_time(str::from_utf8_unchecked(buf.as_slice()), DarkGrey, &args.no_color)?
+        };*/
+        let addr_position = connections.addr_position(peer_addr).unwrap();
+        let mut conns = connections.connections.lock().unwrap();
+        let messages_sent = conns[addr_position].messages_sent.clone();
+        line = decrypt(
+            &buf,
+            &secret,
+            &mut conns[addr_position].csprng,
+            &messages_sent,
+        ).unwrap();
+        if !conns[addr_position].local {
+            conns[addr_position].messages_sent += 1
+        }
+        drop(conns);
         line = line.trim().to_string();
         time = Local::now().format("%H:%M:%S");
         match line {
