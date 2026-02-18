@@ -15,9 +15,7 @@ use std::thread::spawn;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
-struct Connections {
-    connections: Vec<TcpStream>,
-}
+struct Connections { streams: Vec<TcpStream> }
 
 #[derive(Parser)]
 pub struct Args {
@@ -37,17 +35,17 @@ pub struct Args {
     log_path: String,
 }
 
+const CONNECTION_TIMEOUT: Duration = Duration::from_millis(5000);
+
 fn main() -> std::io::Result<()> {
-    const TIMEOUT: Duration = Duration::from_millis(5000);
     let args = Arc::new(Args::parse());
-    let mut nick = args.nick.clone();
+    let nick = Arc::new(Mutex::new(args.nick.clone()));
     let stdin = stdin();
     let mut stdout = stdout();
     let mut input = String::new();
     let connections: Arc<Mutex<Connections>> = Arc::new(Mutex::new(Connections {
-        connections: Vec::new(),
+        streams: Vec::new(),
     }));
-    let mut msg;
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let addr = addr.as_str();
 
@@ -59,24 +57,16 @@ fn main() -> std::io::Result<()> {
 
     let c = connections.clone();
     let a = args.clone();
-    spawn(move || listener(a, c));
+    let n = nick.clone();
+    spawn(move || listener(a, c, n));
 
-    msg = format!("Connecting to {addr}...");
-    print_with_time(&msg, DarkGrey, &args.no_color)?;
-    if let Some(mut conn) = connect(addr, TIMEOUT) {
-        msg = format!("Successfully connected to {addr}");
-        print_with_time(&msg, Green, &args.no_color)?;
-        if !nick.is_empty() {
-            let msg = format!("/nick {nick}\n");
-            let encrypted = encrypt(&msg).unwrap();
-            conn.write_all(encrypted.as_slice())?;
-            conn.flush()?;
-        }
-        connections.lock().unwrap().connections.push(conn);
-    } else {
-        msg = format!("Unable to connect to {addr}");
-        print_with_time(&msg, Red, &args.no_color)?;
-    }
+    new_connection(
+        addr,
+        connections.clone(),
+        &args.nick,
+        args.clone(),
+        true
+    )?;
 
     loop {
         input.clear();
@@ -92,71 +82,44 @@ fn main() -> std::io::Result<()> {
                     terminal::Clear(CurrentLine)
                 )?;
                 let addr = input.split_whitespace().last().unwrap();
-                if connections
-                    .lock()
-                    .unwrap()
-                    .connections
-                    .iter()
-                    .find(|c| c.peer_addr().unwrap().to_string() == addr)
-                    .is_some()
-                {
-                    msg = format!("Already connected to {addr}");
-                    print_with_time(&msg, Red, &args.no_color)?;
-                } else {
-                    msg = format!("Connecting to {addr}...");
-                    print_with_time(&msg, DarkGrey, &args.no_color)?;
-                    if let Some(mut conn) = connect(addr, TIMEOUT) {
-                        msg = format!("Successfully connected to {addr}");
-                        print_with_time(&msg, Green, &args.no_color)?;
-                        if !nick.is_empty() {
-                            let msg = format!("/nick {nick}\n");
-                            let encrypted = encrypt(&msg).unwrap();
-                            conn.write_all(encrypted.as_slice())?;
-                            conn.flush()?;
-                        }
-                        let a = args.clone();
-                        let s = conn.try_clone()?;
-                        let c = connections.clone();
-                        spawn(|| {
-                            handle_incoming(s, a, c).unwrap();
-                        });
-                        connections.lock().unwrap().connections.push(conn);
-                    } else {
-                        msg = format!("Unable to connect to {addr}");
-                        print_with_time(&msg, Red, &args.no_color)?;
-                    }
-                }
+                new_connection(
+                    addr,
+                    connections.clone(),
+                    &nick.lock().unwrap(),
+                    args.clone(),
+                    false,
+                )?;
             }
             _ if input.starts_with("/nick ") || input.starts_with("/n ") => {
-                nick = input.split_whitespace().last().unwrap().to_string();
-                let encrypted = encrypt(&input).unwrap();
+                *nick.lock().unwrap() = input.split_whitespace().last().unwrap().to_string();
                 execute!(
                     stdout,
                     cursor::MoveToPreviousLine(1),
                     terminal::Clear(CurrentLine)
                 )?;
-                for conn in &mut connections.lock().unwrap().connections {
-                    conn.write_all(encrypted.as_slice())?;
-                    conn.flush()?;
+                for stream in &mut connections.lock().unwrap().streams {
+                    set_nick(stream, &nick.lock().unwrap())?;
                 }
             }
             _ => {
-                let encrypted = encrypt(&input).unwrap();
                 execute!(
                     stdout,
                     cursor::MoveToPreviousLine(1),
                     terminal::Clear(CurrentLine)
                 )?;
-                for conn in &mut connections.lock().unwrap().connections {
-                    conn.write_all(encrypted.as_slice())?;
-                    conn.flush()?;
+                for stream in &mut connections.lock().unwrap().streams {
+                    send_msg(stream, &input)?;
                 }
             }
         }
     }
 }
 
-fn print_with_time(msg: &String, color: Color, monochrome: &bool) -> std::io::Result<()> {
+fn print_with_time(
+    msg: &String,
+    color: Color,
+    monochrome: &bool
+) -> std::io::Result<()> {
     let mut stdout = stdout();
     let time = Local::now().format("%H:%M:%S");
     if !monochrome {
@@ -179,7 +142,26 @@ fn print_with_time(msg: &String, color: Color, monochrome: &bool) -> std::io::Re
     Ok(())
 }
 
-fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::Result<()> {
+fn send_msg(stream: &mut TcpStream, msg: &String) -> std::io::Result<()> {
+    let encrypted = encrypt(msg).unwrap();
+    stream.write_all(encrypted.as_slice())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn set_nick(stream: &mut TcpStream, nick: &String) -> std::io::Result<()> {
+    if !nick.is_empty() {
+        let msg = format!("/nick {nick}\n");
+        send_msg(stream, &msg)?;
+    }
+    Ok(())
+}
+
+fn listener(
+    args: Arc<Args>,
+    connections: Arc<Mutex<Connections>>,
+    nick: Arc<Mutex<String>>
+) -> std::io::Result<()> {
     let addr = format!("{}:{}", args.listen_ip, args.listen_port);
     let msg = format!("Listening on {addr}...");
     print_with_time(&msg, DarkGrey, &args.no_color)?;
@@ -188,12 +170,9 @@ fn listener(args: Arc<Args>, connections: Arc<Mutex<Connections>>) -> std::io::R
         let mut s = stream?;
         let a = args.clone();
         let c = connections.clone();
-        if !args.nick.is_empty() {
-            s.write_all(format!("/nick {}\n", args.nick).as_str().as_bytes())?;
-            s.flush()?;
-        }
+        set_nick(&mut s, &nick.lock().unwrap())?;
+        c.lock().unwrap().streams.push(s.try_clone()?);
         spawn(move || {
-            c.lock().unwrap().connections.push(s.try_clone().unwrap());
             handle_incoming(s, a, c).unwrap();
         });
     }
@@ -269,17 +248,11 @@ fn handle_incoming(
 
     loop {
         msg_len = [0u8; 8];
-        reader.read_exact(&mut msg_len)?;
-        buf.clear();
-        buf.resize(u64::from_be_bytes(msg_len) as usize, 0);
-        reader.read_exact(&mut buf)?;
-        line = decrypt(&buf).unwrap();
-
-        if line.is_empty() {
+        if let Err(_) = reader.read_exact(&mut msg_len) {
             connections
                 .lock()
                 .unwrap()
-                .connections
+                .streams
                 .retain(|s| s.peer_addr().unwrap() != stream.peer_addr().unwrap());
             if !args.no_color {
                 execute!(
@@ -325,6 +298,10 @@ fn handle_incoming(
 
             return Ok(());
         }
+        buf.clear();
+        buf.resize(u64::from_be_bytes(msg_len) as usize, 0);
+        reader.read_exact(&mut buf)?;
+        line = decrypt(&buf).unwrap();
         line = line.trim().to_string();
         time = Local::now().format("%H:%M:%S");
         match line {
@@ -426,14 +403,57 @@ fn handle_incoming(
     }
 }
 
-fn connect(addr: &str, timeout: Duration) -> Option<TcpStream> {
-    let now = Instant::now();
-    loop {
-        if let Ok(stream) = TcpStream::connect(addr) {
-            return Some(stream);
+fn new_connection(
+    addr: &str,
+    connections: Arc<Mutex<Connections>>,
+    nick: &String,
+    args: Arc<Args>,
+    send_only: bool,
+) -> std::io::Result<()> {
+    let mut msg: String;
+    if connections
+        .lock()
+        .unwrap()
+        .streams
+        .iter()
+        .find(|c| c.peer_addr().unwrap().to_string() == addr)
+        .is_some()
+    {
+        msg = format!("Already connected to {addr}");
+        print_with_time(&msg, Red, &args.no_color)?;
+    } else {
+        msg = format!("Connecting to {addr}...");
+        print_with_time(&msg, DarkGrey, &args.no_color)?;
+        if let Some(mut stream) = connect(addr) {
+            msg = format!("Successfully connected to {addr}");
+            print_with_time(&msg, Green, &args.no_color)?;
+            set_nick(&mut stream, &nick)?;
+            if !send_only {
+                let a = args.clone();
+                let s = stream.try_clone()?;
+                let c = connections.clone();
+                spawn(|| {
+                    handle_incoming(s, a, c).unwrap();
+                });
+            }
+            connections.lock().unwrap().streams.push(stream);
+        } else {
+            msg = format!("Unable to connect to {addr}");
+            print_with_time(&msg, Red, &args.no_color)?;
         }
-        if now.elapsed() > timeout {
-            return None;
+    }
+
+    return Ok(());
+
+    fn connect(addr: &str) -> Option<TcpStream> {
+        let now = Instant::now();
+        loop {
+            if let Ok(stream) = TcpStream::connect(addr) {
+                return Some(stream);
+            }
+            if now.elapsed() > CONNECTION_TIMEOUT {
+                return None;
+            }
         }
     }
 }
