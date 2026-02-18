@@ -67,7 +67,9 @@ fn main() -> std::io::Result<()> {
         msg = format!("Successfully connected to {addr}");
         print_with_time(&msg, Green, &args.no_color)?;
         if !nick.is_empty() {
-            conn.write_all(format!("/nick {nick}\n").as_str().as_bytes())?;
+            let msg = format!("/nick {nick}\n");
+            let encrypted = encrypt(&msg).unwrap();
+            conn.write_all(encrypted.as_slice())?;
             conn.flush()?;
         }
         connections.lock().unwrap().connections.push(conn);
