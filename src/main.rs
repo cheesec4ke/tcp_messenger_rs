@@ -1,3 +1,5 @@
+use chacha20poly1305::aead::{Aead, OsRng};
+use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce};
 use chrono::Local;
 use clap::Parser;
 use crossterm::style::Color::*;
@@ -5,7 +7,7 @@ use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::ClearType::CurrentLine;
 use crossterm::{cursor, execute, terminal};
 use std::fs::{exists, File};
-use std::io::{stdin, stdout, BufRead, BufReader, LineWriter, Write};
+use std::io::{stdin, stdout, BufReader, LineWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
@@ -105,7 +107,9 @@ fn main() -> std::io::Result<()> {
                         msg = format!("Successfully connected to {addr}");
                         print_with_time(&msg, Green, &args.no_color)?;
                         if !nick.is_empty() {
-                            conn.write_all(format!("/nick {nick}\n").as_str().as_bytes())?;
+                            let msg = format!("/nick {nick}\n");
+                            let encrypted = encrypt(&msg).unwrap();
+                            conn.write_all(encrypted.as_slice())?;
                             conn.flush()?;
                         }
                         let a = args.clone();
@@ -123,24 +127,26 @@ fn main() -> std::io::Result<()> {
             }
             _ if input.starts_with("/nick ") || input.starts_with("/n ") => {
                 nick = input.split_whitespace().last().unwrap().to_string();
+                let encrypted = encrypt(&input).unwrap();
                 execute!(
                     stdout,
                     cursor::MoveToPreviousLine(1),
                     terminal::Clear(CurrentLine)
                 )?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.write_all(input.as_bytes())?;
+                    conn.write_all(encrypted.as_slice())?;
                     conn.flush()?;
                 }
             }
             _ => {
+                let encrypted = encrypt(&input).unwrap();
                 execute!(
                     stdout,
                     cursor::MoveToPreviousLine(1),
                     terminal::Clear(CurrentLine)
                 )?;
                 for conn in &mut connections.lock().unwrap().connections {
-                    conn.write_all(input.as_bytes())?;
+                    conn.write_all(encrypted.as_slice())?;
                     conn.flush()?;
                 }
             }
@@ -200,7 +206,9 @@ fn handle_incoming(
     let mut stdout = stdout();
     let peer_addr = stream.peer_addr()?.to_string();
     let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
+    let mut msg_len: [u8; 8];
+    let mut line: String;
+    let mut buf = Vec::new();
     let mut nick = peer_addr.clone();
     let color = random_color();
     let mut time = Local::now().format("%H:%M:%S");
@@ -258,8 +266,13 @@ fn handle_incoming(
     }
 
     loop {
-        line.clear();
-        reader.read_line(&mut line)?;
+        msg_len = [0u8; 8];
+        reader.read_exact(&mut msg_len)?;
+        buf.clear();
+        buf.resize(u64::from_be_bytes(msg_len) as usize, 0);
+        reader.read_exact(&mut buf)?;
+        line = decrypt(&buf).unwrap();
+
         if line.is_empty() {
             connections
                 .lock()
@@ -441,8 +454,33 @@ fn random_color() -> Color {
     colors[fastrand::usize(0..12)]
 }
 
-//todo: encrypt messages
-/*fn encode(data: &[u8]) -> &[u8] {
+fn encrypt(string: &String) -> Option<Vec<u8>> {
+    let key = ChaCha20Poly1305::generate_key(&mut OsRng);
+    let cipher = ChaCha20Poly1305::new(&key);
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    match cipher.encrypt(&nonce, string.as_bytes()) {
+        Ok(e) => {
+            let mut encrypted = Vec::from(key.as_slice());
+            encrypted.extend_from_slice(&nonce);
+            encrypted.extend_from_slice(&e);
+            let mut output = Vec::from(encrypted.len().to_be_bytes());
+            output.extend_from_slice(encrypted.as_slice());
+            Some(output)
+        }
+        Err(_) => None,
+    }
+}
 
-    data
-}*/
+fn decrypt(bytes: &[u8]) -> Option<String> {
+    let key = Key::from_slice(&bytes[0..32]);
+    let cipher = ChaCha20Poly1305::new(&key);
+    let nonce = Nonce::from_slice(&bytes[32..44]);
+    let text = &bytes[44..];
+    match cipher.decrypt(&nonce, text) {
+        Ok(d) => {
+            let decrypted = String::from_utf8(d).unwrap();
+            Some(decrypted)
+        }
+        Err(_) => None,
+    }
+}
