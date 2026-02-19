@@ -13,8 +13,9 @@ use crossterm::{cursor, execute, terminal};
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use std::fs::{exists, File};
-use std::io::{stdin, stdout, LineWriter, Read, Write};
+use std::io::{stdin, stdout, BufReader, BufWriter, LineWriter, Read, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
@@ -167,6 +168,13 @@ fn main() -> std::io::Result<()> {
                     }
                 }
             }
+            _ if input.starts_with("/send_file ") || input.starts_with("/sf ") => {
+                let input = input.split_whitespace().last().unwrap().to_string();
+                let path = Path::new(&input);
+                if path.try_exists()? {
+                    connections.send_file(&path)?
+                }
+            }
             _ if input.starts_with("/nick ") || input.starts_with("/n ") => {
                 *nick.lock().unwrap() = input.split_whitespace().last().unwrap().to_string();
                 connections.set_nick(&nick.lock().unwrap())?;
@@ -222,7 +230,7 @@ fn handle_incoming(
     connections: Arc<Connections>,
 ) -> std::io::Result<()> {
     let mut stdout = stdout();
-    let mut msg_len: [u8; 8];
+    let mut header = [0u8; 8];
     let mut line: String;
     let mut buf = Vec::new();
     let mut time = Local::now().format("%H:%M:%S");
@@ -239,10 +247,13 @@ fn handle_incoming(
 
     let addr_position = connections.addr_position(peer_addr).unwrap();
     let mut conns = connections.connections.lock().unwrap();
+    let mut messages_sent = conns[addr_position].messages_sent.clone();
     let secret = conns[addr_position].secret.clone();
     let mut nick = conns[addr_position].peer_nick.clone();
     let color = conns[addr_position].peer_color.clone();
-    let mut stream = conns[addr_position].stream.try_clone()?;
+    let mut reader = BufReader::new(
+        conns[addr_position].stream.try_clone()?
+    );
     conns[addr_position].messages_sent = 0;
     drop(conns);
 
@@ -289,8 +300,7 @@ fn handle_incoming(
     }
 
     loop {
-        msg_len = [0u8; 8];
-        if let Err(_) = stream.read_exact(&mut msg_len) {
+        if let Err(_) = reader.read_exact(&mut header) {
             connections.disconnect(&peer_addr, true);
             if !args.no_color {
                 execute!(
@@ -335,59 +345,98 @@ fn handle_incoming(
             }
             return Ok(());
         }
-        buf.clear();
-        buf.resize(u64::from_be_bytes(msg_len) as usize, 0);
-        stream.read_exact(&mut buf)?;
-        /*unsafe {
-            print_with_time(str::from_utf8_unchecked(buf.as_slice()), DarkGrey, &args.no_color)?
-        };*/
-        let addr_position = connections.addr_position(peer_addr).unwrap();
-        let mut conns = connections.connections.lock().unwrap();
-        let messages_sent = conns[addr_position].messages_sent.clone();
-        line = decrypt(
-            &buf,
-            &secret,
-            &mut conns[addr_position].csprng,
-            &messages_sent,
-        ).unwrap();
-        if !conns[addr_position].local {
-            conns[addr_position].messages_sent += 1
-        }
-        drop(conns);
-        line = line.trim().to_string();
-        time = Local::now().format("%H:%M:%S");
-        match line {
-            _ if line.starts_with("/nick ") || line.starts_with("/n ") => {
-                let new_nick = line.split_whitespace().last().unwrap().to_string();
-                if !args.no_color {
-                    execute!(
-                        stdout,
-                        cursor::MoveToColumn(0),
-                        SetForegroundColor(DarkGrey),
-                        Print(&time),
-                        ResetColor,
-                        Print(" | <"),
-                        SetForegroundColor(color),
-                        Print(&nick),
-                        ResetColor,
-                        Print("> "),
-                        SetForegroundColor(DarkGrey),
-                        Print("changed nickname to"),
-                        ResetColor,
-                        Print(" <"),
-                        SetForegroundColor(color),
-                        Print(&new_nick),
-                        ResetColor,
-                        Print(">\n  input  : "),
-                    )?;
-                } else {
-                    print!("\r{time} | <{nick}> changed nickname to <{new_nick}>\n  input  : ");
-                    stdout.flush()?;
+        let info = header[7];
+        header[7] = 0;
+        if info == 255 {
+            let conns = connections.connections.lock().unwrap();
+            let mut csprng = conns[addr_position].csprng.clone();
+            let messages_sent = conns[addr_position].messages_sent.clone();
+            drop(conns);
+            let file_size = u64::from_le_bytes(header);
+            reader.read_exact(&mut header)?;
+            buf.resize(u64::from_le_bytes(header) as usize, 0);
+            reader.read_exact(&mut buf)?;
+            let file_name =
+                String::from_utf8(decrypt(
+                    &buf, 
+                    &secret, 
+                    &mut csprng, 
+                    &messages_sent
+                ).unwrap()).unwrap();
+            let path = Path::new(&file_name);
+            let msg = format!("Receiving file \"{file_name}\" ({file_size} bytes)");
+            print_with_time(&msg, DarkYellow, &args.no_color)?;
+            let file = if let Ok(f) = File::create_new(&path) {
+                Some(f)
+            } else {
+                let mut fl = None;
+                'rename: for n in 1..100 {
+                    let new_path = format!(
+                        "{}_{}{}",
+                        path.file_prefix().unwrap().to_str().unwrap(),
+                        n,
+                        if let Some(e) = path.extension() {
+                            let mut s = String::from('.');
+                            s.push_str(e.to_str().unwrap());
+                            s
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if let Ok(f) = File::create_new(new_path) {
+                        fl = Some(f);
+                        break 'rename;
+                    }
                 }
-                if let Some(log) = &mut log {
-                    if args.color_logs {
+                fl
+            };
+            if let Some(mut f) = file {
+                let mut buf_writer = BufWriter::new(&mut f);
+                let pieces = (file_size + 8000u64 - 1) / 8000u64;
+                for p in 0..pieces {
+                    reader.read_exact(&mut header)?;
+                    buf.resize(u64::from_le_bytes(header) as usize, 0);
+                    reader.read_exact(&mut buf)?;
+                    let bytes = decrypt(&buf, &secret, &mut csprng, &messages_sent).unwrap();
+                    buf_writer.write_all(&bytes)?;
+                    buf_writer.flush()?;
+                    let msg = format!("Received piece {}/{pieces}", p + 1);
+                    print_with_time(&msg, DarkGrey, &args.no_color)?;
+                }
+            } else {
+                //todo failed to create file
+            }
+        } else {
+            buf.resize(u64::from_le_bytes(header) as usize, 0);
+            reader.read_exact(&mut buf)?;
+            /*unsafe {
+                print_with_time(str::from_utf8_unchecked(buf.as_slice()), DarkGrey, &args.no_color)?
+            };*/
+            let addr_position = connections.addr_position(peer_addr).unwrap();
+            let mut conns = connections.connections.lock().unwrap();
+            line = String::from_utf8(
+                decrypt(
+                    &buf,
+                    &secret,
+                    &mut conns[addr_position].csprng,
+                    &messages_sent,
+                ).unwrap(),
+            )
+            .unwrap();
+            if !conns[addr_position].local {
+                conns[addr_position].messages_sent += 1
+            }
+            messages_sent = conns[addr_position].messages_sent.clone();
+            drop(conns);
+            line = line.trim().to_string();
+            time = Local::now().format("%H:%M:%S");
+            match line {
+                _ if line.starts_with("/nick ") || line.starts_with("/n ") => {
+                    let new_nick = line.split_whitespace().last().unwrap().to_string();
+                    if !args.no_color {
                         execute!(
-                            log,
+                            stdout,
+                            cursor::MoveToColumn(0),
                             SetForegroundColor(DarkGrey),
                             Print(&time),
                             ResetColor,
@@ -403,42 +452,50 @@ fn handle_incoming(
                             SetForegroundColor(color),
                             Print(&new_nick),
                             ResetColor,
-                            Print(">\n"),
+                            Print(">\n  input  : "),
                         )?;
                     } else {
-                        log.write(
-                            format!("{} | <{}> changed nickname to <{}>\n", time, nick, new_nick)
-                                .as_bytes(),
-                        )?;
+                        print!("\r{time} | <{nick}> changed nickname to <{new_nick}>\n  input  : ");
+                        stdout.flush()?;
                     }
+                    if let Some(log) = &mut log {
+                        if args.color_logs {
+                            execute!(
+                                log,
+                                SetForegroundColor(DarkGrey),
+                                Print(&time),
+                                ResetColor,
+                                Print(" | <"),
+                                SetForegroundColor(color),
+                                Print(&nick),
+                                ResetColor,
+                                Print("> "),
+                                SetForegroundColor(DarkGrey),
+                                Print("changed nickname to"),
+                                ResetColor,
+                                Print(" <"),
+                                SetForegroundColor(color),
+                                Print(&new_nick),
+                                ResetColor,
+                                Print(">\n"),
+                            )?;
+                        } else {
+                            log.write(
+                                format!(
+                                    "{} | <{}> changed nickname to <{}>\n",
+                                    time, nick, new_nick
+                                ).as_bytes(),
+                            )?;
+                        }
+                    }
+                    nick = new_nick;
+                    connections.set_peer_nick(&peer_addr, &nick);
                 }
-                nick = new_nick;
-                connections.set_peer_nick(&peer_addr, &nick);
-            }
-            _ => {
-                if !args.no_color {
-                    execute!(
-                        stdout,
-                        cursor::MoveToColumn(0),
-                        SetForegroundColor(DarkGrey),
-                        Print(&time),
-                        ResetColor,
-                        Print(" | <"),
-                        SetForegroundColor(color),
-                        Print(&nick),
-                        ResetColor,
-                        Print("> "),
-                        Print(&line),
-                        Print("\n  input  : ")
-                    )?;
-                } else {
-                    print!("\r{time} | <{nick}> {line}\n  input  : ");
-                    stdout.flush()?;
-                }
-                if let Some(log) = &mut log {
-                    if args.color_logs {
+                _ => {
+                    if !args.no_color {
                         execute!(
-                            log,
+                            stdout,
+                            cursor::MoveToColumn(0),
                             SetForegroundColor(DarkGrey),
                             Print(&time),
                             ResetColor,
@@ -448,10 +505,30 @@ fn handle_incoming(
                             ResetColor,
                             Print("> "),
                             Print(&line),
-                            Print("\n")
+                            Print("\n  input  : ")
                         )?;
                     } else {
-                        log.write(format!("{time} | <{nick}> {line}\n").as_bytes())?;
+                        print!("\r{time} | <{nick}> {line}\n  input  : ");
+                        stdout.flush()?;
+                    }
+                    if let Some(log) = &mut log {
+                        if args.color_logs {
+                            execute!(
+                                log,
+                                SetForegroundColor(DarkGrey),
+                                Print(&time),
+                                ResetColor,
+                                Print(" | <"),
+                                SetForegroundColor(color),
+                                Print(&nick),
+                                ResetColor,
+                                Print("> "),
+                                Print(&line),
+                                Print("\n")
+                            )?;
+                        } else {
+                            log.write(format!("{time} | <{nick}> {line}\n").as_bytes())?;
+                        }
                     }
                 }
             }

@@ -4,9 +4,11 @@ use crossterm::style::Color;
 use crossterm::style::Color::{DarkGrey, Red};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use std::fs::File;
 use std::io;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
@@ -37,6 +39,13 @@ impl Connections {
     pub(crate) fn send_msg(&self, msg: &String) -> io::Result<()> {
         for conn in self.connections.lock().unwrap().iter_mut() {
             conn.send_msg(msg)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send_file(&self, path: &Path) -> io::Result<()> {
+        for conn in self.connections.lock().unwrap().iter_mut() {
+            conn.send_file(&path)?;
         }
         Ok(())
     }
@@ -189,12 +198,64 @@ impl Connection {
         }
     }*/
 
-    fn send_msg(&mut self, msg: &String) -> io::Result<()> {
-        let encrypted = encrypt(msg, &self.secret, &mut self.csprng, &self.messages_sent).unwrap();
+    fn send_msg(&mut self, msg: &str) -> io::Result<()> {
+        let encrypted = encrypt(
+            msg.as_bytes(),
+            &self.secret,
+            &mut self.csprng,
+            &self.messages_sent,
+        ).unwrap();
         self.messages_sent += 1;
         self.stream.write_all(encrypted.as_slice())?;
         self.stream.flush()?;
         Ok(())
+    }
+
+    pub(crate) fn send_file(&mut self, path: &Path) -> io::Result<bool> {
+        if !self.local {
+            match File::open(path) {
+                Ok(file) => {
+                    let piece_size = 8000usize;
+                    let mut writer = BufWriter::new(&self.stream);
+                    let file_size = file.metadata()?.len();
+                    let mut header = file_size.to_le_bytes().to_vec();
+                    header[7] = 255;
+                    writer.write_all(&header)?;
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    let enc_name = encrypt(
+                        name.as_bytes(),
+                        &self.secret,
+                        &mut self.csprng,
+                        &self.messages_sent,
+                    ).unwrap();
+                    //dbg!((&enc_name, &self.stream, self.secret, self.messages_sent));
+                    writer.write(&enc_name.as_slice())?;
+
+                    let reader = &mut BufReader::new(file);
+                    let mut buffer = Vec::with_capacity(piece_size);
+                    let pieces = (file_size + piece_size as u64 - 1) / piece_size as u64;
+                    for _piece in 0..pieces {
+                        buffer.clear();
+                        //let msg = format!("reading piece {}/{pieces}", piece + 1);
+                        //print_with_time(&msg, Red, &false)?;
+                        reader.take(piece_size as u64).read_to_end(&mut buffer)?;
+                        let e = encrypt(
+                            &buffer,
+                            &self.secret,
+                            &mut self.csprng,
+                            &self.messages_sent
+                        ).unwrap();
+                        writer.write_all(&e)?;
+                        writer.flush()?;
+                    }
+
+                    Ok(true)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(false)
+        }
     }
 
     pub(crate) fn send_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
