@@ -1,2 +1,6 @@
+/.idea
+/.vscode
 /target
 Cargo.lock
+messenger.log
+tcp_messenger.toml

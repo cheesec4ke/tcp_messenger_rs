@@ -1,1 +1,2 @@
-Basic TCP messenger
+# tcp_messenger_rs
+Basic TCP messenger using <a href='https://ratatui.rs'>Ratatui</a> for UI and <a href='https://crates.io/crates/chacha20poly1305'>ChaCha20Poly1305</a>/<a href='https://crates.io/crates/x25519-dalek'>x25519-dalek</a> for encryption

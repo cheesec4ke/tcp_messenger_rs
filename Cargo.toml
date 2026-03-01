@@ -1,12 +1,17 @@
 [package]
 name = "tcp_messenger_rs"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
-chacha20poly1305 = "0.10.1"
-chrono = "0.4.43"
-clap = { version = "4.5.59", features = ["derive"] }
-crossterm = "0.29.0"
-rand_chacha = "0.3.1"
-x25519-dalek = { version = "2.0.1", features = ["getrandom"] }
+chacha20poly1305 = "0.11.0-rc.3"
+chrono = "0.4.44"
+color-eyre = "0.6.5"
+clap = { version = "4.5.60", features = ["derive"] }
+crc-fast = "1.10.0"
+fastrand = "2.3.0"
+pnet = "0.35.0"
+ratatui = "0.30.0"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.0.3"
+x25519-dalek = { version = "3.0.0-pre.6", features = ["getrandom"] }

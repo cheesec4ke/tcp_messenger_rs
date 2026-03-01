@@ -1,286 +1,355 @@
-use crate::{encrypt, handle_connection, print_with_time, random_color, Args};
-use crossterm::style::Color;
-use crossterm::style::Color::{DarkGrey, Red};
-use std::fs::File;
-use std::io;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpStream};
-use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread::spawn;
-use std::time::{Duration, Instant};
-use crate::encryption::establish_shared_secret;
+use crate::app;
+use crate::app::Event::{
+    ConnectionEvent, DisconnectionEvent, ErrorEvent, ListenEvent, MessageEvent, NewStream,
+};
+use crate::encryption::*;
+use crate::functions::random_color;
+use crate::types::Nick;
+use crc_fast::checksum_file;
+use crc_fast::CrcAlgorithm::Crc32IsoHdlc;
+use pnet::datalink;
+use pnet::ipnetwork::IpNetwork;
+use ratatui::prelude::{Color, Style};
+use std::fs;
+use std::io::Read;
+use std::io::{BufReader, BufWriter, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
-const PIECE_SIZE: u64 = 8000;
+pub(crate) const CONNECTION_RETRIES: u16 = 10;
+///Piece size in bytes for sending files (64MiB)
+const PIECE_SIZE: u64 = 64 * (1024 ^ 2);
 
-type Connections = RwLock<Vec<Connection>>;
-#[derive(Debug)]
-pub(crate) struct State {
-    pub(crate) nick: RwLock<Option<String>>,
-    pub(crate) connections: Connections,
-}
-impl State {
-    pub(crate) fn set_nick(&self, nick: &str) -> io::Result<()> {
-        self.nick.write().unwrap().replace(nick.to_owned());
-        let n = self.nick.read().unwrap();
-        for conn in self.connections.read().unwrap().iter() {
-            conn.update_nick(&n)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn set_peer_nick(&self, peer_addr: &str, nick: &str) {
-        if let Some(index) = self.addr_position(peer_addr) {
-            self.connections
-                .read()
-                .unwrap()[index]
-                .peer_nick
-                .lock()
-                .unwrap()
-                .clone_from(&Some(nick.to_string()));
-        }
-    }
-
-    pub(crate) fn send_msg(&self, msg: &String) -> io::Result<()> {
-        for conn in self.connections.write().unwrap().iter_mut() {
-            conn.send_msg(msg)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn send_file(&self, path: &Path) -> io::Result<()> {
-        for conn in self.connections.write().unwrap().iter_mut() {
-            conn.send_file(&path)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn disconnect(&self, peer_addr: &str, shutdown: bool) -> bool {
-        let mut disconnected = false;
-        self.connections.write().unwrap().retain_mut(|s| {
-            if let Ok(a) = s.stream.peer_addr() {
-                if a.to_string() != *peer_addr {
-                    true
-                } else {
-                    if shutdown {
-                        s.stream.shutdown(Shutdown::Both).unwrap();
-                    }
-                    disconnected = true;
-                    false
-                }
-            } else {
-                disconnected = true;
-                false
-            }
-        });
-        disconnected
-    }
-
-    /*fn get_addr(&self, nick: &String) -> Option<String> {
-        if let Some(index) = self.nick_position(nick) {
-            Some(
-                self.connections.lock().unwrap()[index]
-                    .stream
-                    .peer_addr()
-                    .unwrap()
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    }*/
-
-    pub(crate) fn addr_position(&self, ip: &str) -> Option<usize> {
-        self.connections
-            .read()
-            .unwrap()
-            .iter()
-            .position(|c| c.peer_addr.eq(ip))
-    }
-
-    /*fn nick_position(&self, nick: &str) -> Option<usize> {
-        self.connections
-            .lock()
-            .unwrap()
-            .iter()
-            .position(|c| c.peer_nick.eq(nick))
-    }*/
-
-    pub(crate) fn new_connection(
-        state: Arc<Self>,
-        addr: &str,
-        args: Arc<Args>,
-    ) -> io::Result<()> {
-        let msg: String;
-
-        if state.addr_position(&addr).is_some() {
-            msg = format!("Already connected to {addr}");
-            print_with_time(&msg, Red, &args.no_color)?;
-        } else {
-            msg = format!("Connecting to {addr}...");
-            print_with_time(&msg, DarkGrey, &args.no_color)?;
-            let now = Instant::now();
-            loop {
-                if let Ok(s) = TcpStream::connect(addr) {
-                    spawn(move || -> io::Result<()> {
-                        handle_connection(s, args, state, false)
-                    });
-                    break;
-                }
-                if now.elapsed() > CONNECTION_TIMEOUT {
-                    return Err(io::Error::new(
-                        ErrorKind::Other,
-                        format!("Connection to {addr} timed out")
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
+///Struct to store the state of a connection
 #[derive(Debug)]
 pub(crate) struct Connection {
     pub(crate) stream: TcpStream,
     pub(crate) local_addr: String,
     pub(crate) peer_addr: String,
-    pub(crate) peer_nick: RwLock<Option<String>>,
-    pub(crate) peer_color: RwLock<Color>,
+    pub(crate) peer_nick: Nick,
+    pub(crate) peer_color: Color,
+    ///Shared secret between two peers used for encryption,
+    ///generated by [`establish_shared_secret`]
     pub(crate) secret: [u8; 32],
-    pub(crate) message_num: Mutex<u128>,
+    ///Lock to prevent sending multiple messages to the same peer at once,
+    ///value inside the [`Mutex`] is never read
+    pub(crate) send_lock: Mutex<u8>,
 }
-impl Connection {
-    /*pub(crate) fn connect(addr: &str) -> io::Result<Self> {
-        let now = Instant::now();
-        loop {
-            if let Ok(stream) = TcpStream::connect(addr) {
-                Self::new(stream)?;
-                break Ok(/* value */);
-            }
-            if now.elapsed() > CONNECTION_TIMEOUT {
-                return Err(io::Error::new(
-                    ErrorKind::Other,
-                    format!("Connection to {addr} timed out")
-                ));
+
+///Message types, used as the first byte of each message header
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MessageType {
+    Text = 255u8,
+    File = 254u8,
+    Image = 253u8,
+    Command = 252u8,
+}
+
+impl TryFrom<u8> for MessageType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Text),
+            254 => Ok(Self::File),
+            253 => Ok(Self::Image),
+            252 => Ok(Self::Command),
+            _ => Err(Self::Error::default()),
+        }
+    }
+}
+
+///Starts a [`TcpListener`] on `listen_addr`
+///and sends each incoming [`TcpStream`] to the app as a [`NewStream`] event
+pub(crate) fn connection_listener(
+    tx: mpsc::Sender<app::Event>,
+    listen_addr: String,
+) -> color_eyre::Result<()> {
+    if let Ok(listener) = TcpListener::bind(&listen_addr) {
+        let local_addr = listener.local_addr()?.to_string();
+        tx.send(MessageEvent(vec![(
+            format!("Listening on {}...", local_addr),
+            Style::new().dark_gray(),
+        )]))?;
+        tx.send(ListenEvent(local_addr.clone()))?;
+        for stream in listener.incoming() {
+            if let Ok(s) = stream {
+                tx.send(NewStream(s))?;
             }
         }
-    }*/
-
-    pub(crate) fn new(mut stream: TcpStream) -> io::Result<Self> {
-        let secret = establish_shared_secret(&mut stream)?;
-        let local_addr = stream.local_addr()?.to_string();
-        let peer_addr = stream.peer_addr()?.to_string();
-        Ok(Connection {
-            stream,
-            local_addr,
-            peer_addr,
-            peer_nick: Mutex::new(None),
-            peer_color: Mutex::new(random_color()),
-            secret,
-            message_num: Mutex::new(0),
-        })
+    } else {
+        tx.send(ErrorEvent(format!(
+            "Failed to start listener on {listen_addr}..."
+        )))?;
     }
 
-    /*pub(crate) fn try_clone(&self) -> std::io::Result<Connection> {
-        match self.stream.try_clone() {
-            Ok(stream) => Ok(Self {
-                stream,
-                peer_nick: self.peer_nick.clone(),
-                peer_color: self.peer_color.clone(),
-            }),
-            Err(e) => Err(e),
-        }
-    }*/
+    Ok(())
+}
 
-    fn send_msg(&self, msg: &str) -> io::Result<()> {
-        let mut message_num = self.message_num.lock().unwrap();
-        let mut writer = BufWriter::new(&self.stream);
-        let encrypted = encrypt(
-            msg.as_bytes(),
-            &self.secret,
-            &mut message_num,
-        ).unwrap();
-        let header = header(&encrypted, 0);
-        writer.write_all(&header)?;
-        writer.write_all(encrypted.as_slice())?;
-        writer.flush()?;
-        Ok(())
-    }
+pub(crate) fn connection_handler(
+    tx: mpsc::Sender<app::Event>,
+    running: Arc<AtomicBool>,
+    mut stream: TcpStream,
+) -> color_eyre::Result<()> {
+    let mut header = [0u8; 8];
+    let mut buf: Vec<u8> = vec![];
+    let mut line: String;
+    let local_addr = stream.local_addr()?.to_string();
+    let peer_addr = stream.peer_addr()?.to_string();
+    let secret = if let Ok(s) = establish_shared_secret(&mut stream) {
+        s
+    } else {
+        tx.send(ErrorEvent(format!(
+            "Failed to establish shared secret with {peer_addr}"
+        )))?;
+        return Ok(());
+    };
+    let connection = Arc::new(Connection {
+        stream,
+        local_addr,
+        peer_addr,
+        peer_nick: RwLock::new(None),
+        peer_color: random_color(),
+        secret,
+        send_lock: Mutex::new(0),
+    });
+    let mut reader = BufReader::new(&connection.stream);
+    tx.send(ConnectionEvent(connection.clone()))?;
 
-    pub(crate) fn send_file(&self, path: &Path) -> io::Result<bool> {
-        match File::open(path) {
-            Ok(file) => {
-                let mut stream_writer = BufWriter::new(&self.stream);
-
-                let file_size = file.metadata()?.len();
-                let mut header = file_size.to_be_bytes().to_vec();
-                header[0] = 255;
-                stream_writer.write_all(&header)?;
-                let name = path.file_name().unwrap().to_str().unwrap();
-                let enc_name = encrypt(
-                    name.as_bytes(),
-                    &self.secret,
-                    &mut self.message_num.lock().unwrap(),
-                ).unwrap();
-                //dbg!((&enc_name, &self.stream, self.secret, self.messages_sent));
-                header = enc_name.len().to_be_bytes().to_vec();
-                stream_writer.write(&enc_name.as_slice())?;
-
-                let file_reader = &mut BufReader::new(file);
-                let mut buffer = Vec::with_capacity(PIECE_SIZE as usize);
-                let pieces = (file_size + PIECE_SIZE- 1) / PIECE_SIZE;
-                for _piece in 0..pieces {
-                    buffer.clear();
-                    //let msg = format!("reading piece {}/{pieces}", piece + 1);
-                    //print_with_time(&msg, Red, &false)?;
-                    file_reader.take(PIECE_SIZE).read_to_end(&mut buffer)?;
-                    let e = encrypt(
-                        &buffer,
-                        &self.secret,
-                        &mut self.message_num.lock().unwrap(),
-                    ).unwrap();
-                    stream_writer.write_all(&e)?;
+    while running.load(Ordering::Relaxed) {
+        if let Err(_) = reader.read_exact(&mut header) {
+            tx.send(DisconnectionEvent(connection.peer_addr.clone()))?;
+            return Ok(());
+        } else {
+            let nick = if let Some(n) = connection.peer_nick.read().unwrap().clone() {
+                n
+            } else {
+                connection.peer_addr.clone()
+            };
+            let msg_type = match MessageType::try_from(header[0]) {
+                Ok(msg_type) => msg_type,
+                _ => MessageType::Text,
+            };
+            header[0] = 0;
+            match msg_type {
+                MessageType::Text => {
+                    buf.resize(usize::from_be_bytes(header), 0);
+                    reader.read_exact(&mut buf)?;
+                    line = String::from_utf8(decrypt(&buf, &connection.secret)?)?;
+                    tx.send(MessageEvent(vec![
+                        ("<".to_string(), Style::new()),
+                        (nick, Style::new().fg(connection.peer_color)),
+                        (format!("> {line}"), Style::new()),
+                    ]))?;
                 }
-                stream_writer.flush()?;
+                MessageType::Command => {
+                    buf.resize(usize::from_be_bytes(header), 0);
+                    reader.read_exact(&mut buf)?;
+                    line = String::from_utf8(decrypt(&buf, &connection.secret)?)?;
+                    let mut parts = line.splitn(2, ' ');
+                    if let Some(cmd) = parts.next()
+                        && let Some(arg) = parts.next()
+                    {
+                        match cmd {
+                            "/nick" | "/n" => {
+                                let peer_nick = arg.trim();
+                                connection
+                                    .peer_nick
+                                    .write()
+                                    .unwrap()
+                                    .replace(peer_nick.to_string());
+                                tx.send(MessageEvent(vec![
+                                    ("<".to_string(), Style::new()),
+                                    (nick, Style::new().fg(connection.peer_color)),
+                                    ("> ".to_string(), Style::new()),
+                                    (
+                                        "changed their nickname to".to_string(),
+                                        Style::new().dark_gray(),
+                                    ),
+                                    (" <".to_string(), Style::new()),
+                                    (
+                                        peer_nick.to_string(),
+                                        Style::new().fg(connection.peer_color),
+                                    ),
+                                    (">".to_string(), Style::new()),
+                                ]))?;
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                MessageType::File => {
+                    let file_size = u64::from_be_bytes(header);
+                    reader.read_exact(&mut header)?;
+                    header[0] = 0;
+                    buf.resize(u64::from_be_bytes(header) as usize, 0);
+                    reader.read_exact(&mut buf)?;
+                    let crc =
+                        u64::from_be_bytes(decrypt(&buf, &connection.secret)?.try_into().unwrap());
+                    reader.read_exact(&mut header)?;
+                    buf.resize(u64::from_be_bytes(header) as usize, 0);
+                    reader.read_exact(&mut buf)?;
+                    let file_name = String::from_utf8(decrypt(&buf, &connection.secret)?)?;
+                    tx.send(MessageEvent(vec![
+                        ("Receiving file".to_string(), Style::new().dark_gray()),
+                        (format!(" \"{file_name}\" "), Style::new()),
+                        ("from".to_string(), Style::new().dark_gray()),
+                        (" <".to_string(), Style::new()),
+                        (nick.clone(), Style::new().fg(connection.peer_color)),
+                        (">".to_string(), Style::new()),
+                        ("...".to_string(), Style::new().dark_gray()),
+                    ]))?;
 
-                Ok(true)
+                    let path = Path::new(&file_name);
+                    let (file, new_path) = if let Ok(f) = fs::File::create_new(&path) {
+                        (Some(f), Some(path.to_str().unwrap().to_string()))
+                    } else {
+                        let (mut fl, mut np) = (None, None);
+                        'rename: for n in 1..usize::MAX {
+                            //should format new_path as path_n.ext if path has a file extension
+                            let p = path.to_str().unwrap();
+                            let mut parts = (p, "");
+                            let mut split = "";
+                            if !path
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .rfind('.')
+                                .unwrap_or(1)
+                                == 0
+                                && let Some(p) = path.to_str().unwrap().rsplit_once('.')
+                            {
+                                parts = p;
+                                split = ".";
+                            }
+                            let new_path = format!("{}_{}{}{}", parts.0, n, split, parts.1);
+                            if let Ok(f) = fs::File::create_new(new_path.clone()) {
+                                fl = Some(f);
+                                np = Some(new_path);
+                                break 'rename;
+                            }
+                        }
+                        (fl, np)
+                    };
+                    if let Some(mut file) = file
+                        && let Some(new_path) = new_path
+                    {
+                        let mut buf_writer = BufWriter::new(&mut file);
+                        let pieces = (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+                        for _piece in 0..pieces {
+                            reader.read_exact(&mut header)?;
+                            buf.resize(u64::from_be_bytes(header) as usize, 0);
+                            reader.read_exact(&mut buf)?;
+                            let bytes = decrypt(&buf, &connection.secret)?;
+                            buf_writer.write_all(&bytes)?;
+                        }
+                        buf_writer.flush()?;
+                        tx.send(MessageEvent(vec![
+                            ("Received file".to_string(), Style::new().dark_gray()),
+                            (format!(" \"{file_name}\" "), Style::new()),
+                            ("from".to_string(), Style::new().dark_gray()),
+                            (" <".to_string(), Style::new()),
+                            (nick, Style::new().fg(connection.peer_color)),
+                            (">".to_string(), Style::new()),
+                        ]))?;
+                        let file_crc = checksum_file(Crc32IsoHdlc, &new_path, None)?;
+                        if file_crc != crc {
+                            tx.send(ErrorEvent(
+                                format!("Error: Received file \"{file_name}\" failed checksum, possibly corrupted")
+                            ))?;
+                        }
+                    }
+                }
+                _ => (),
             }
-            Err(e) => Err(e),
         }
     }
 
-    pub(crate) fn send_bytes(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut writer = BufWriter::new(&self.stream);
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        Ok(())
-    }
-
-    pub(crate) fn update_nick(&self, nick: &Option<String>) -> io::Result<()> {
-        if let Some(n) = nick {
-            let msg = format!("/nick {n}\n");
-            self.send_msg(&msg)?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
-///Generates an 8 byte header with the first bytes representing a message type
-///and the next 7 bytes being the length of the message in big-endian bytes
-///
-///Message types:
-///
-///0: normal message
-///
-///254: nick change
-///
-///255: file
-///
-///Technically fails if the message is more than 256 TiB
-///as the 1st byte of the length is ignored
-pub(crate) fn header(msg: &Vec<u8>, msg_type: u8) -> [u8; 8] {
+///Locks `connection.send_lock`, encrypts `msg`,
+///and sends the encrypted message with a header of `msg_type` to `connection.stream`
+pub(crate) fn send_msg(
+    connection: Arc<Connection>,
+    msg: Arc<String>,
+    msg_type: MessageType,
+) -> color_eyre::Result<()> {
+    let mut writer = BufWriter::new(&connection.stream);
+    let encrypted = encrypt(msg.as_bytes(), &connection.secret)?;
+    let header = generate_header(&encrypted, msg_type);
+    let lock = connection.send_lock.lock();
+    writer.write_all(&header)?;
+    writer.write_all(&encrypted)?;
+    writer.flush()?;
+    drop(lock);
+
+    Ok(())
+}
+
+pub(crate) fn send_file(connection: Arc<Connection>, path: Arc<PathBuf>) -> color_eyre::Result<()> {
+    let file = fs::File::open(path.as_path())?;
+    let mut buffer = Vec::with_capacity(PIECE_SIZE as usize);
+    let mut stream_writer = BufWriter::new(&connection.stream);
+    let file_reader = &mut BufReader::new(&file);
+
+    let file_size = file.metadata()?.len();
+    let mut header = file_size.to_be_bytes().to_vec();
+    header[0] = 254;
+    //acquire lock before first write
+    let lock = connection.send_lock.lock();
+    stream_writer.write_all(&header)?;
+
+    //calculate, encrypt, and send CRC-32 checksum
+    let crc = checksum_file(Crc32IsoHdlc, path.to_str().unwrap(), None)?;
+    let enc_crc = encrypt(&crc.to_be_bytes(), &connection.secret)?;
+    header = Vec::from(generate_header(&enc_crc, MessageType::Text));
+    stream_writer.write_all(&header)?;
+    stream_writer.write_all(&enc_crc)?;
+
+    //get, encrypt, and send file name
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let enc_name = encrypt(name.as_bytes(), &connection.secret)?;
+    header = enc_name.len().to_be_bytes().to_vec();
+    stream_writer.write_all(&header)?;
+    stream_writer.write_all(&enc_name)?;
+
+    //encrypt and send each piece
+    let pieces = (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+    for _piece in 0..pieces {
+        buffer.clear();
+        file_reader.take(PIECE_SIZE).read_to_end(&mut buffer)?;
+        let e = encrypt(&buffer, &connection.secret)?;
+        header = e.len().to_be_bytes().to_vec();
+        stream_writer.write_all(&header)?;
+        stream_writer.write_all(&e)?;
+    }
+    stream_writer.flush()?;
+    drop(lock);
+
+    Ok(())
+}
+
+pub(crate) fn generate_header(msg: &Vec<u8>, msg_type: MessageType) -> [u8; 8] {
     let mut header: [u8; 8] = msg.len().to_be_bytes();
-    header[0] = msg_type;
+    header[0] = msg_type as u8;
     header
+}
+
+///Returns a vector of all IPv4 addresses on the local machine
+pub(crate) fn local_ipv4_addrs() -> Vec<String> {
+    let mut ips = vec![];
+    for iface in datalink::interfaces() {
+        for ip in iface.ips {
+            if let IpNetwork::V4(_) = ip {
+                ips.push(ip.ip().to_string());
+            }
+        }
+    }
+
+    ips
 }
