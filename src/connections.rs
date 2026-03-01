@@ -1,50 +1,56 @@
-use crate::{encrypt, handle_incoming, print_with_time, random_color, Args};
-use chacha20poly1305::aead::OsRng;
+use crate::{encrypt, handle_connection, print_with_time, random_color, Args};
 use crossterm::style::Color;
 use crossterm::style::Color::{DarkGrey, Red};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use std::fs::File;
 use std::io;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use crate::encryption::establish_shared_secret;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const PIECE_SIZE: u64 = 8000;
 
+type Connections = RwLock<Vec<Connection>>;
 #[derive(Debug)]
-pub(crate) struct Connections {
-    pub(crate) connections: Mutex<Vec<Connection>>,
+pub(crate) struct State {
+    pub(crate) nick: RwLock<Option<String>>,
+    pub(crate) connections: Connections,
 }
-impl Connections {
-    pub(crate) fn set_nick(&self, nick: &String) -> io::Result<()> {
-        for conn in self.connections.lock().unwrap().iter_mut() {
-            conn.set_nick(nick)?;
+impl State {
+    pub(crate) fn set_nick(&self, nick: &str) -> io::Result<()> {
+        self.nick.write().unwrap().replace(nick.to_owned());
+        let n = self.nick.read().unwrap();
+        for conn in self.connections.read().unwrap().iter() {
+            conn.update_nick(&n)?;
         }
         Ok(())
     }
 
     pub(crate) fn set_peer_nick(&self, peer_addr: &str, nick: &str) {
         if let Some(index) = self.addr_position(peer_addr) {
-            self.connections.lock().unwrap()[index]
+            self.connections
+                .read()
+                .unwrap()[index]
                 .peer_nick
-                .clone_from(&nick.to_string());
+                .lock()
+                .unwrap()
+                .clone_from(&Some(nick.to_string()));
         }
     }
 
     pub(crate) fn send_msg(&self, msg: &String) -> io::Result<()> {
-        for conn in self.connections.lock().unwrap().iter_mut() {
+        for conn in self.connections.write().unwrap().iter_mut() {
             conn.send_msg(msg)?;
         }
         Ok(())
     }
 
     pub(crate) fn send_file(&self, path: &Path) -> io::Result<()> {
-        for conn in self.connections.lock().unwrap().iter_mut() {
+        for conn in self.connections.write().unwrap().iter_mut() {
             conn.send_file(&path)?;
         }
         Ok(())
@@ -52,7 +58,7 @@ impl Connections {
 
     pub(crate) fn disconnect(&self, peer_addr: &str, shutdown: bool) -> bool {
         let mut disconnected = false;
-        self.connections.lock().unwrap().retain_mut(|s| {
+        self.connections.write().unwrap().retain_mut(|s| {
             if let Ok(a) = s.stream.peer_addr() {
                 if a.to_string() != *peer_addr {
                     true
@@ -87,10 +93,10 @@ impl Connections {
 
     pub(crate) fn addr_position(&self, ip: &str) -> Option<usize> {
         self.connections
-            .lock()
+            .read()
             .unwrap()
             .iter()
-            .position(|c| c.stream.peer_addr().unwrap().to_string().eq(ip))
+            .position(|c| c.peer_addr.eq(ip))
     }
 
     /*fn nick_position(&self, nick: &str) -> Option<usize> {
@@ -102,89 +108,78 @@ impl Connections {
     }*/
 
     pub(crate) fn new_connection(
-        &self,
-        connections: Arc<Self>,
+        state: Arc<Self>,
         addr: &str,
-        nick: &String,
         args: Arc<Args>,
-        send_only: bool,
-        local: bool,
-    ) -> io::Result<String> {
-        let mut msg: String;
-        let mut local_addr = None;
-        if self.addr_position(&addr).is_some() {
+    ) -> io::Result<()> {
+        let msg: String;
+
+        if state.addr_position(&addr).is_some() {
             msg = format!("Already connected to {addr}");
             print_with_time(&msg, Red, &args.no_color)?;
         } else {
             msg = format!("Connecting to {addr}...");
             print_with_time(&msg, DarkGrey, &args.no_color)?;
-            if let Some(stream) = connect(addr) {
-                let p = stream.peer_addr()?.to_string();
-                local_addr = Some(stream.local_addr()?.to_string());
-                let mut conn = Connection::from_tcp_stream(stream);
-                conn.local = local;
-                let es = EphemeralSecret::random_from_rng(OsRng);
-                let pk = PublicKey::from(&es);
-                conn.send_bytes(pk.as_bytes())?;
-                let mut buf = [0u8; 32];
-                conn.stream.read_exact(&mut buf)?;
-                conn.secret = es.diffie_hellman(&PublicKey::from(buf)).to_bytes();
-                conn.csprng = ChaCha20Rng::from_seed(conn.secret);
-                conn.csprng.set_word_pos(0);
-                conn.set_nick(&nick)?;
-                self.connections.lock().unwrap().push(conn);
-                if !send_only {
-                    let a = args.clone();
-                    let conns = connections.clone();
-                    spawn(move || {
-                        handle_incoming(&p, a, conns).unwrap();
-                    });
-                }
-                msg = format!("Connected to {addr}");
-                print_with_time(&msg, DarkGrey, &args.no_color)?;
-            } else {
-                msg = format!("Unable to connect to {addr}");
-                print_with_time(&msg, Red, &args.no_color)?;
-            }
-        }
-
-        return local_addr.ok_or(io::Error::new(ErrorKind::Other, "no connection available"));
-
-        fn connect(addr: &str) -> Option<TcpStream> {
             let now = Instant::now();
             loop {
-                if let Ok(stream) = TcpStream::connect(addr) {
-                    return Some(stream);
+                if let Ok(s) = TcpStream::connect(addr) {
+                    spawn(move || -> io::Result<()> {
+                        handle_connection(s, args, state, false)
+                    });
+                    break;
                 }
                 if now.elapsed() > CONNECTION_TIMEOUT {
-                    return None;
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        format!("Connection to {addr} timed out")
+                    ));
                 }
             }
         }
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Connection {
     pub(crate) stream: TcpStream,
-    pub(crate) peer_nick: String,
-    pub(crate) peer_color: Color,
+    pub(crate) local_addr: String,
+    pub(crate) peer_addr: String,
+    pub(crate) peer_nick: RwLock<Option<String>>,
+    pub(crate) peer_color: RwLock<Color>,
     pub(crate) secret: [u8; 32],
-    pub(crate) csprng: ChaCha20Rng,
-    pub(crate) messages_sent: u128,
-    pub(crate) local: bool,
+    pub(crate) message_num: Mutex<u128>,
 }
 impl Connection {
-    pub(crate) fn from_tcp_stream(stream: TcpStream) -> Connection {
-        Self {
-            peer_nick: stream.peer_addr().unwrap().to_string(),
-            stream,
-            peer_color: random_color(),
-            secret: [0u8; 32],
-            csprng: ChaCha20Rng::from_seed([0u8; 32]),
-            messages_sent: 0u128,
-            local: false,
+    /*pub(crate) fn connect(addr: &str) -> io::Result<Self> {
+        let now = Instant::now();
+        loop {
+            if let Ok(stream) = TcpStream::connect(addr) {
+                Self::new(stream)?;
+                break Ok(/* value */);
+            }
+            if now.elapsed() > CONNECTION_TIMEOUT {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!("Connection to {addr} timed out")
+                ));
+            }
         }
+    }*/
+
+    pub(crate) fn new(mut stream: TcpStream) -> io::Result<Self> {
+        let secret = establish_shared_secret(&mut stream)?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
+        Ok(Connection {
+            stream,
+            local_addr,
+            peer_addr,
+            peer_nick: Mutex::new(None),
+            peer_color: Mutex::new(random_color()),
+            secret,
+            message_num: Mutex::new(0),
+        })
     }
 
     /*pub(crate) fn try_clone(&self) -> std::io::Result<Connection> {
@@ -198,77 +193,94 @@ impl Connection {
         }
     }*/
 
-    fn send_msg(&mut self, msg: &str) -> io::Result<()> {
+    fn send_msg(&self, msg: &str) -> io::Result<()> {
+        let mut message_num = self.message_num.lock().unwrap();
+        let mut writer = BufWriter::new(&self.stream);
         let encrypted = encrypt(
             msg.as_bytes(),
             &self.secret,
-            &mut self.csprng,
-            &self.messages_sent,
+            &mut message_num,
         ).unwrap();
-        self.messages_sent += 1;
-        self.stream.write_all(encrypted.as_slice())?;
-        self.stream.flush()?;
+        let header = header(&encrypted, 0);
+        writer.write_all(&header)?;
+        writer.write_all(encrypted.as_slice())?;
+        writer.flush()?;
         Ok(())
     }
 
-    pub(crate) fn send_file(&mut self, path: &Path) -> io::Result<bool> {
-        if !self.local {
-            match File::open(path) {
-                Ok(file) => {
-                    let piece_size = 8000usize;
-                    let mut writer = BufWriter::new(&self.stream);
-                    let file_size = file.metadata()?.len();
-                    let mut header = file_size.to_le_bytes().to_vec();
-                    header[7] = 255;
-                    writer.write_all(&header)?;
-                    let name = path.file_name().unwrap().to_str().unwrap();
-                    let enc_name = encrypt(
-                        name.as_bytes(),
+    pub(crate) fn send_file(&self, path: &Path) -> io::Result<bool> {
+        match File::open(path) {
+            Ok(file) => {
+                let mut stream_writer = BufWriter::new(&self.stream);
+
+                let file_size = file.metadata()?.len();
+                let mut header = file_size.to_be_bytes().to_vec();
+                header[0] = 255;
+                stream_writer.write_all(&header)?;
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let enc_name = encrypt(
+                    name.as_bytes(),
+                    &self.secret,
+                    &mut self.message_num.lock().unwrap(),
+                ).unwrap();
+                //dbg!((&enc_name, &self.stream, self.secret, self.messages_sent));
+                header = enc_name.len().to_be_bytes().to_vec();
+                stream_writer.write(&enc_name.as_slice())?;
+
+                let file_reader = &mut BufReader::new(file);
+                let mut buffer = Vec::with_capacity(PIECE_SIZE as usize);
+                let pieces = (file_size + PIECE_SIZE- 1) / PIECE_SIZE;
+                for _piece in 0..pieces {
+                    buffer.clear();
+                    //let msg = format!("reading piece {}/{pieces}", piece + 1);
+                    //print_with_time(&msg, Red, &false)?;
+                    file_reader.take(PIECE_SIZE).read_to_end(&mut buffer)?;
+                    let e = encrypt(
+                        &buffer,
                         &self.secret,
-                        &mut self.csprng,
-                        &self.messages_sent,
+                        &mut self.message_num.lock().unwrap(),
                     ).unwrap();
-                    //dbg!((&enc_name, &self.stream, self.secret, self.messages_sent));
-                    writer.write(&enc_name.as_slice())?;
-
-                    let reader = &mut BufReader::new(file);
-                    let mut buffer = Vec::with_capacity(piece_size);
-                    let pieces = (file_size + piece_size as u64 - 1) / piece_size as u64;
-                    for _piece in 0..pieces {
-                        buffer.clear();
-                        //let msg = format!("reading piece {}/{pieces}", piece + 1);
-                        //print_with_time(&msg, Red, &false)?;
-                        reader.take(piece_size as u64).read_to_end(&mut buffer)?;
-                        let e = encrypt(
-                            &buffer,
-                            &self.secret,
-                            &mut self.csprng,
-                            &self.messages_sent
-                        ).unwrap();
-                        writer.write_all(&e)?;
-                        writer.flush()?;
-                    }
-
-                    Ok(true)
+                    stream_writer.write_all(&e)?;
                 }
-                Err(e) => Err(e),
+                stream_writer.flush()?;
+
+                Ok(true)
             }
-        } else {
-            Ok(false)
+            Err(e) => Err(e),
         }
     }
 
-    pub(crate) fn send_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stream.write_all(bytes)?;
-        self.stream.flush()?;
+    pub(crate) fn send_bytes(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut writer = BufWriter::new(&self.stream);
+        writer.write_all(bytes)?;
+        writer.flush()?;
         Ok(())
     }
 
-    pub(crate) fn set_nick(&mut self, nick: &String) -> io::Result<()> {
-        if !nick.is_empty() {
-            let msg = format!("/nick {nick}\n");
+    pub(crate) fn update_nick(&self, nick: &Option<String>) -> io::Result<()> {
+        if let Some(n) = nick {
+            let msg = format!("/nick {n}\n");
             self.send_msg(&msg)?;
         }
         Ok(())
     }
+}
+
+///Generates an 8 byte header with the first bytes representing a message type
+///and the next 7 bytes being the length of the message in big-endian bytes
+///
+///Message types:
+///
+///0: normal message
+///
+///254: nick change
+///
+///255: file
+///
+///Technically fails if the message is more than 256 TiB
+///as the 1st byte of the length is ignored
+pub(crate) fn header(msg: &Vec<u8>, msg_type: u8) -> [u8; 8] {
+    let mut header: [u8; 8] = msg.len().to_be_bytes();
+    header[0] = msg_type;
+    header
 }
