@@ -1,5 +1,5 @@
-use crate::app;
-use crate::app::Event::{
+use crate::app::AppEvent;
+use crate::app::AppEvent::{
     ConnectionEvent, DisconnectionEvent, ErrorEvent, ListenEvent, MessageEvent, NewStream,
 };
 use crate::encryption::*;
@@ -65,7 +65,7 @@ impl TryFrom<u8> for MessageType {
 ///Starts a [`TcpListener`] on `listen_addr`
 ///and sends each incoming [`TcpStream`] to the app as a [`NewStream`] event
 pub(crate) fn connection_listener(
-    tx: mpsc::Sender<app::Event>,
+    tx: mpsc::Sender<AppEvent>,
     listen_addr: String,
 ) -> color_eyre::Result<()> {
     if let Ok(listener) = TcpListener::bind(&listen_addr) {
@@ -90,7 +90,7 @@ pub(crate) fn connection_listener(
 }
 
 pub(crate) fn connection_handler(
-    tx: mpsc::Sender<app::Event>,
+    tx: mpsc::Sender<AppEvent>,
     running: Arc<AtomicBool>,
     mut stream: TcpStream,
 ) -> color_eyre::Result<()> {

@@ -1,4 +1,4 @@
-use crate::app::Event::*;
+use crate::app::AppEvent::*;
 use crate::config::Config;
 use crate::connections::{
     connection_handler, connection_listener, local_ipv4_addrs, send_file, send_msg,
@@ -9,14 +9,15 @@ use crate::types::Nick;
 use chrono::Local;
 use color_eyre::Result;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::crossterm::event;
+use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::{Line, Widget};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::merge::MergeStrategy::Fuzzy;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
-use ratatui::{crossterm, DefaultTerminal, Frame};
+use ratatui::{DefaultTerminal, Frame};
 use std::io::{BufWriter, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
@@ -32,22 +33,22 @@ type Message = Vec<(String, Style)>;
 
 ///Events for updating the app state
 #[derive(Debug)]
-pub(crate) enum Event {
-    ///[`Event`] containing a [`crossterm::event::Event`]
-    InputEvent(crossterm::event::Event),
-    ///[`Event`] containing a [`Message`]
+pub(crate) enum AppEvent {
+    ///[`AppEvent`] containing a [`Event`]
+    InputEvent(Event),
+    ///[`AppEvent`] containing a [`Message`]
     MessageEvent(Message),
     ErrorEvent(String),
-    ///[`Event`] containing a [`TcpStream`]
+    ///[`AppEvent`] containing a [`TcpStream`]
     NewStream(TcpStream),
-    ///[`Event`] containing an [`Arc<Connection>`]
+    ///[`AppEvent`] containing an [`Arc<Connection>`]
     ConnectionEvent(Arc<Connection>),
-    ///[`Event`] containing the address of a peer that disconnected as a [`String`]
+    ///[`AppEvent`] containing the address of a peer that disconnected as a [`String`]
     DisconnectionEvent(String),
-    ///[`Event`] containing a listen address as a [`String`],
+    ///[`AppEvent`] containing a listen address as a [`String`],
     ///used for updating the local username when none is set
     ListenEvent(String),
-    ///Generic [`Event`] for forcing the app to render
+    ///Generic [`AppEvent`] for forcing the app to render
     Update,
 }
 
@@ -62,8 +63,8 @@ pub(crate) struct App {
     pub(crate) nick: Nick,
     pub(crate) color: Color,
     pub(crate) input_buf: (String, usize),
-    pub(crate) tx: Sender<Event>,
-    pub(crate) rx: Receiver<Event>,
+    pub(crate) tx: Sender<AppEvent>,
+    pub(crate) rx: Receiver<AppEvent>,
     pub(crate) show_peers: bool,
     pub(crate) config: Config,
 }
@@ -71,7 +72,7 @@ pub(crate) struct App {
 impl App {
     ///Creates a new [`App`] instance with the given [`Config`]
     pub(crate) fn new(config: Config) -> Result<Self> {
-        let (tx, rx) = mpsc::channel::<Event>();
+        let (tx, rx) = mpsc::channel::<AppEvent>();
         let listen_addr = format!("{}:{}", config.listen_ips[0], config.listen_ports[0]);
         let log_file = if config.log_messages {
             if !fs::exists(&config.log_path)? {
@@ -188,9 +189,9 @@ impl App {
     }
 
     ///Handles [crossterm] events, currently only key presses
-    fn handle_input(&mut self, event: crossterm::event::Event) -> Result<()> {
+    fn handle_input(&mut self, event: Event) -> Result<()> {
         match event {
-            crossterm::event::Event::Key(key) => match key.code {
+            Event::Key(key) => match key.code {
                 KeyCode::Esc => {
                     self.running.store(false, Ordering::Relaxed); //exits app
                 }
@@ -666,9 +667,9 @@ impl Widget for &App {
 }
 
 ///Sends each input as an [`InputEvent`] to the app
-fn input_listener(tx: Sender<Event>, running: Arc<AtomicBool>) -> Result<()> {
+fn input_listener(tx: Sender<AppEvent>, running: Arc<AtomicBool>) -> Result<()> {
     while running.load(Ordering::Relaxed) {
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(event) = event::read() {
             tx.send(InputEvent(event))?;
         }
     }
