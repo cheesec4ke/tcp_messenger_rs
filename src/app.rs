@@ -55,18 +55,18 @@ pub(crate) enum AppEvent {
 ///Struct to store the app state
 #[derive(Debug)]
 pub(crate) struct App {
-    pub(crate) running: Arc<AtomicBool>,
-    pub(crate) connections: Connections,
-    pub(crate) messages: Vec<Message>,
-    pub(crate) log_file: Option<fs::File>,
-    pub(crate) listen_addr: String,
-    pub(crate) nick: Nick,
-    pub(crate) color: Color,
-    pub(crate) input_buf: (String, usize),
-    pub(crate) tx: Sender<AppEvent>,
-    pub(crate) rx: Receiver<AppEvent>,
-    pub(crate) show_peers: bool,
-    pub(crate) config: Config,
+    running: Arc<AtomicBool>,
+    connections: Connections,
+    messages: Vec<Message>,
+    log_file: Option<fs::File>,
+    listen_addr: String,
+    nick: Nick,
+    color: Color,
+    input_buf: (String, usize),
+    tx: Sender<AppEvent>,
+    rx: Receiver<AppEvent>,
+    show_peers: bool,
+    config: Config,
 }
 
 impl App {
