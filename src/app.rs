@@ -4,21 +4,28 @@ use crate::connections::{
     connection_handler, connection_listener, local_ipv4_addrs, send_file, send_msg,
     Connection, MessageType, CONNECTION_RETRIES,
 };
-use crate::functions::*;
+use crate::functions::random_color;
 use crate::types::Nick;
 use chrono::Local;
 use color_eyre::Result;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event;
-use ratatui::crossterm::event::{Event, KeyCode, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::prelude::{Line, Widget};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::merge::MergeStrategy::Fuzzy;
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget,
+    Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
-use std::io::{BufWriter, Write};
+use std::cell::Cell;
+use std::io::{stdout, BufWriter, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +72,8 @@ pub(crate) struct App {
     input_buf: (String, usize),
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
+    terminal_size: (u16, u16),
+    scroll_pos: Cell<usize>,
     show_peers: bool,
     config: Config,
 }
@@ -98,6 +107,8 @@ impl App {
             input_buf: (String::new(), 0),
             tx,
             rx,
+            terminal_size: ratatui::crossterm::terminal::size()?,
+            scroll_pos: Cell::new(0),
             show_peers: true,
             config,
         })
@@ -105,6 +116,9 @@ impl App {
 
     ///Runs [`App`] in `terminal`
     pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let mut stdout = stdout();
+        ratatui::crossterm::execute!(stdout, EnableMouseCapture)?;
+
         let t = self.tx.clone();
         let r = self.running.clone();
         spawn(move || -> Result<()> { input_listener(t, r) });
@@ -134,6 +148,7 @@ impl App {
             self.update()?;
         }
 
+        ratatui::crossterm::execute!(stdout, DisableMouseCapture)?;
         Ok(())
     }
 
@@ -193,13 +208,27 @@ impl App {
         match event {
             Event::Key(key) => match key.code {
                 KeyCode::Esc => {
-                    self.running.store(false, Ordering::Relaxed); //exits app
+                    self.running.store(false, Ordering::Relaxed);
                 }
                 KeyCode::Tab => {
                     self.show_peers = !self.show_peers;
                 }
-                KeyCode::Up => {} //todo scrolling
-                KeyCode::Down => {}
+                KeyCode::PageUp => {
+                    self.scroll_pos.set(
+                        //-2 for the border, -2 for the input box
+                        self.scroll_pos.get() + self.terminal_size.1 as usize - 4
+                    );
+                }
+                KeyCode::PageDown => {
+                    let scroll_pos = self.scroll_pos.get();
+                    //-2 for the border, -2 for the input box
+                    let page_size = self.terminal_size.1 as usize - 4;
+                    if scroll_pos >= page_size {
+                        self.scroll_pos.set(scroll_pos - page_size);
+                    } else {
+                        self.scroll_pos.set(0);
+                    }
+                }
                 KeyCode::Left => {
                     if self.input_buf.1 <= self.input_buf.0.len() {
                         self.input_buf.1 += 1;
@@ -250,6 +279,35 @@ impl App {
                 }
                 _ => (),
             },
+            Event::Mouse(m) => match m.kind {
+                ScrollUp => {
+                    self.scroll_pos.set(self.scroll_pos.get() + 1);
+                }
+                ScrollDown => {
+                    let scroll_pos = self.scroll_pos.get();
+                    if scroll_pos > 0 {
+                        self.scroll_pos.set(scroll_pos - 1);
+                    }
+                }
+                _ => (),
+            },
+            Event::Resize(width, height) => {
+                let scroll_pos = self.scroll_pos.get();
+                //keep scroll position when resizing
+                if scroll_pos > 0 {
+                    let height_diff = height.abs_diff(self.terminal_size.1);
+                    if height < self.terminal_size.1 {
+                        self.scroll_pos.set(scroll_pos + height_diff as usize);
+                    } else if height > self.terminal_size.1 {
+                        if scroll_pos >= height_diff as usize {
+                            self.scroll_pos.set(scroll_pos - height_diff as usize);
+                        } else {
+                            self.scroll_pos.set(0);
+                        }
+                    }
+                }
+                self.terminal_size = (width, height);
+            }
             _ => (),
         }
 
@@ -471,6 +529,9 @@ impl App {
             (" | ".to_string(), Style::new()),
         ];
         message.extend_from_slice(&msg);
+        if self.scroll_pos.get() > 0 {
+            self.scroll_pos.set(self.scroll_pos.get() + 1);
+        }
         self.log_msg(&message)?;
         Ok(self.messages.push(message))
     }
@@ -545,15 +606,20 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let vertical_layout = Layout::vertical([Constraint::Percentage(100), Constraint::Min(3)]);
+        let scrolling = self.scroll_pos.get() > 0;
+        let vertical_layout = Layout::vertical([
+            Constraint::Percentage(100), Constraint::Min(3)
+        ]);
         let [mut message_area, input_area] = vertical_layout.areas::<2>(area);
-        message_area.height += 1;
+        message_area.height += 1; //overlap borders
 
         if self.show_peers {
             let horizontal_layout =
-                Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)]);
+                Layout::horizontal([
+                    Constraint::Percentage(75), Constraint::Percentage(25)
+                ]);
             let [mut m, peer_area] = horizontal_layout.areas::<2>(message_area);
-            m.width += 1;
+            m.width += 1; //overlap borders
             message_area = m;
 
             let mut peers = vec![];
@@ -589,35 +655,40 @@ impl Widget for &App {
             peer_paragraph.render(peer_area, buf);
         }
 
+        //the -2 is to account for the border
+        let messages_height = message_area.height as usize - 2;
+        //4 accounts for the border + padding, 1 extra for the scrollbar if it's visible
+        let messages_width = message_area.width as usize - if scrolling { 5 } else { 4 };
+        //binding needed for correct lifetime
         let binding = self.messages.clone();
-        let mut messages: Vec<Line> = binding
-            .iter()
-            .map(|m| {
-                let mut line = Line::default();
-                for part in m {
-                    line.push_span(Span::styled(&part.0, part.1));
-                }
-                line
-            })
-            .rev()
-            .collect();
-        let area_height = message_area.height as usize - 2;
-        let area_width = message_area.width as usize - 4;
-        messages.truncate(area_height);
-        let mut wraps = calculate_wraps(&messages, area_width);
-        while (messages.len() + wraps) > area_height {
-            messages.truncate(messages.len() - 1);
-            wraps = calculate_wraps(&messages, area_width);
+        let mut messages: Vec<Line> = wrap_lines(
+            binding.iter().map(|m| message_to_line(m)).collect(),
+            messages_width,
+        );
+        let scroll_max = if messages.len() >= messages_height {
+            messages.len() - messages_height
+        } else {
+            0
+        };
+        if self.scroll_pos.get() > scroll_max {
+            self.scroll_pos.set(scroll_max);
         }
-        messages.reverse();
-        let message_paragraph = Paragraph::new(messages.clone())
+        let scroll_pos = self.scroll_pos.get();
+        let message_paragraph = Paragraph::new(messages)
             .block(
                 Block::bordered()
                     .title("─┤Messages├")
                     .merge_borders(Fuzzy)
-                    .padding(Padding::horizontal(1)),
+                    .padding(Padding {
+                        left: 1,
+                        //make space for the scrollbar if it's visible
+                        right: if scrolling { 2 } else { 1 },
+                        top: 0,
+                        bottom: 0,
+                    }),
             )
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll(((scroll_max - scroll_pos) as u16, 0));
 
         let nick = self
             .nick
@@ -627,7 +698,9 @@ impl Widget for &App {
             .unwrap_or_else(|| self.listen_addr.clone());
         let input_layout = Layout::horizontal([
             Constraint::Max(nick.len() as u16 + 5),
-            Constraint::Fill(1), //Min(self.input_buf.0.len() as u16 + 3) causes a crash when horizontal size is too small
+            Constraint::Fill(1),
+            //Min(self.input_buf.0.len() as u16 + 3) would be preferable,
+            //but causes a crash when the horizontal size is too small
         ]);
         let [mut nick_area, input_area] = input_layout.areas::<2>(input_area);
         nick_area.width += 1;
@@ -651,7 +724,8 @@ impl Widget for &App {
 
         let input = Paragraph::new(Line::from(vec![
             Span::raw(first),
-            Span::styled(second, Style::new().underlined().slow_blink()), //todo make blink actually work
+            //blinking doesn't work on certain terminals
+            Span::styled(second, Style::new().underlined().slow_blink()),
             Span::raw(third),
         ]))
         .block(
@@ -661,9 +735,95 @@ impl Widget for &App {
         );
 
         message_paragraph.render(message_area, buf);
+        if scrolling {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(None)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_symbol("▐");
+            let mut scrollbar_state =
+                ScrollbarState::new(scroll_max).position(scroll_max - scroll_pos);
+            scrollbar.render(
+                message_area.inner(Margin::new(1, 1)),
+                buf,
+                &mut scrollbar_state,
+            );
+        }
         nick.render(nick_area, buf);
         input.render(input_area, buf);
     }
+}
+
+fn message_to_line(message: &Message) -> Line {
+    let mut line = Line::default();
+    for part in message {
+        line.push_span(Span::styled(&part.0, part.1));
+    }
+    line
+}
+
+///Still kinda awful, but manually wrapping lines gives a much more predictable output
+///and makes scrolling work properly
+///
+///Ratatui's [`Wrap`] *almost* just works out of the box,
+///but unfortunately [`Paragraph::scroll()`] relies on there being as many
+///actual lines on the terminal as there are [`Line`]`s` in the [`Paragraph`]
+///to actually be able to display the whole thing
+fn wrap_lines(lines: Vec<Line>, area_width: usize) -> Vec<Line> {
+    let mut output = vec![];
+    let mut line;
+    for l in lines {
+        let mut line_width = 0;
+        line = Line::default();
+        for span in l {
+            let mut first = true;
+            for part in span.content.split(' ') {
+                if !first {
+                    line_width += 1;
+                    if line_width > area_width {
+                        output.push(line.clone());
+                        line = Line::default();
+                        line_width = 1;
+                    }
+                    line.spans.push(Span::styled(" ", span.style));
+                }
+                line_width += part.len();
+                if line_width > area_width {
+                    output.push(line.clone());
+                    line = Line::default();
+                    line_width = part.len();
+                    if part.len() > area_width {
+                        let (mut part_1, mut part_2) = part.split_at(area_width);
+                        line.spans
+                            .push(Span::styled(part_1.to_string(), span.style));
+                        output.push(line.clone());
+                        line = Line::default();
+                        while part_2.len() > area_width {
+                            (part_1, part_2) = part_2.split_at(area_width);
+                            line.spans
+                                .push(Span::styled(part_1.to_string(), span.style));
+                            output.push(line.clone());
+                            line = Line::default();
+                        }
+                        line.spans
+                            .push(Span::styled(part_2.to_string(), span.style));
+                        output.push(line.clone());
+                        line = Line::default();
+                    } else {
+                        line.spans.push(Span::styled(part.to_string(), span.style));
+                    }
+                } else {
+                    line.spans.push(Span::styled(part.to_string(), span.style));
+                }
+                first = false;
+            }
+        }
+        if line != Line::default() {
+            output.push(line.clone());
+        }
+    }
+
+    output
 }
 
 ///Sends each input as an [`InputEvent`] to the app
