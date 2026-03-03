@@ -22,7 +22,7 @@ impl Config {
         let mut file_config = None;
         if !args.no_config {
             if let Some(path) = args.config_path {
-                file_config = Self::read_config_file(&path);
+                file_config = read_config_file(&path);
             } else {
                 let mut config_paths = vec![PathBuf::from("tcp_messenger.toml")];
                 if let Some(dir) = home_dir() {
@@ -36,7 +36,7 @@ impl Config {
                     );
                 }
                 for path in config_paths {
-                    if let Some(a) = Self::read_config_file(&path) {
+                    if let Some(a) = read_config_file(&path) {
                         file_config = Some(a);
                         break;
                     }
@@ -68,22 +68,6 @@ impl Config {
         }
 
         config
-    }
-
-    fn read_config_file(path: &Path) -> Option<Config> {
-        if let Ok(e) = fs::exists(path)
-            && e
-            && let Ok(config) = fs::read_to_string(path) {
-            return match toml::from_str::<Config>(&config) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    eprintln!("Error parsing config file: {e}");
-                    None
-                }
-            };
-        }
-
-        None
     }
 }
 
@@ -127,4 +111,20 @@ pub(crate) struct Args {
     no_config: bool,
     #[arg(short, long)]
     config_path: Option<PathBuf>,
+}
+
+fn read_config_file(path: &Path) -> Option<Config> {
+    if let Ok(e) = fs::exists(path)
+        && e
+        && let Ok(config) = fs::read_to_string(path) {
+        match toml::from_str::<Config>(&config) {
+            Ok(config) => Some(config),
+            Err(e) => {
+                eprintln!("Error parsing config file: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    }
 }

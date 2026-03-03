@@ -3,7 +3,6 @@ mod config;
 mod connections;
 mod encryption;
 mod functions;
-mod types;
 
 use crate::app::App;
 use crate::config::Config;

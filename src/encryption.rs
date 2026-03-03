@@ -35,7 +35,6 @@ pub(crate) fn establish_shared_secret(stream: &mut TcpStream) -> Result<[u8; 32]
     stream.write_all(&pk.to_bytes())?;
     stream.flush()?;
     stream.read_exact(&mut buf)?;
-    let secret = es.diffie_hellman(&PublicKey::from(buf)).to_bytes();
 
-    Ok(secret)
+    Ok(es.diffie_hellman(&PublicKey::from(buf)).to_bytes())
 }
