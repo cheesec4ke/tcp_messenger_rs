@@ -130,7 +130,7 @@ impl App {
                 let addr = format!("{}:{}", ip, port);
                 let t = self.tx.clone();
                 spawn(move || -> Result<()> {
-                    connection_listener(t, addr)
+                    connection_listener(t, &addr)
                 });
             }
         }
@@ -152,10 +152,10 @@ impl App {
     fn update(&mut self) -> Result<()> {
         match self.rx.recv()? {
             InputEvent(event) => {
-                self.handle_input(event)?;
+                self.handle_input(&event)?;
             }
             MessageEvent(message) => {
-                self.display_msg(message)?;
+                self.display_msg(&message)?;
             }
             ErrorEvent(error) => {
                 self.display_error(&error)?;
@@ -181,7 +181,7 @@ impl App {
     }
 
     fn handle_new_connection(&mut self, connection: Arc<Connection>) -> Result<()> {
-        self.display_msg(vec![
+        self.display_msg(&[
             ("<".to_string(), Style::new()),
             (
                 connection.peer_addr.clone(),
@@ -193,14 +193,14 @@ impl App {
         if let Some(n) = self.nick.clone() {
             let c = connection.clone();
             spawn(move || -> Result<()> {
-                send_msg(c, Arc::new(format!("/n {n}")), MessageType::Command)
+                send_msg(c, Arc::new(format!("/n {n}")), &MessageType::Command)
             });
         }
         Ok(self.connections.push(connection))
     }
 
     ///Handles [crossterm] events, currently only key presses
-    fn handle_input(&mut self, event: Event) -> Result<()> {
+    fn handle_input(&mut self, event: &Event) -> Result<()> {
         match event {
             Event::Key(key) => match key.code {
                 KeyCode::Esc => {
@@ -285,9 +285,9 @@ impl App {
                 //keep scroll position when resizing
                 if scroll_pos > 0 {
                     let height_diff = height.abs_diff(self.terminal_size.1);
-                    if height < self.terminal_size.1 {
+                    if height < &self.terminal_size.1 {
                         self.scroll_pos.set(scroll_pos + height_diff as usize);
-                    } else if height > self.terminal_size.1 {
+                    } else if height > &self.terminal_size.1 {
                         if scroll_pos >= height_diff as usize {
                             self.scroll_pos.set(scroll_pos - height_diff as usize);
                         } else {
@@ -295,7 +295,7 @@ impl App {
                         }
                     }
                 }
-                self.terminal_size = (width, height);
+                self.terminal_size = (*width, *height);
             }
             _ => ()
         }
@@ -307,14 +307,14 @@ impl App {
         match self.input_buf {
             _ if self.input_buf.0.starts_with('/') => self.handle_cmd(),
             _ => {
-                self.broadcast_input_msg(MessageType::Text);
-                self.display_input_msg(MessageType::Text)
+                self.broadcast_input_msg(&MessageType::Text);
+                self.display_input_msg(&MessageType::Text)
             }
         }
     }
 
     fn handle_cmd(&mut self) -> Result<()> {
-        self.display_input_msg(MessageType::Command)?;
+        self.display_input_msg(&MessageType::Command)?;
         let binding = self.input_buf.0.clone();
         let mut parts = binding.splitn(2, ' ');
         if let Some(cmd) = parts.next() {
@@ -338,7 +338,7 @@ impl App {
                     "/nick" | "/n" => {
                         let nick = arg.trim().to_string();
                         self.nick.replace(nick);
-                        self.broadcast_input_msg(MessageType::Command);
+                        self.broadcast_input_msg(&MessageType::Command);
                     }
                     "/connect" | "/c" => {
                         self.connect(arg.trim())?;
@@ -356,7 +356,7 @@ impl App {
                                 && let Some(c) = self.get_connection(&a) {
                                 let m = Arc::new(msg.trim().to_string());
                                 spawn(move || -> Result<()> {
-                                    send_msg(c, m, MessageType::Text)?;
+                                    send_msg(c, m, &MessageType::Text)?;
                                     Ok(())
                                 });
                             } else {
@@ -404,7 +404,7 @@ impl App {
         if self.get_connection(addr).is_some() {
             return self.display_error(&format!("Already connected to {addr}"));
         }
-        self.display_msg(vec![(
+        self.display_msg(&[(
             format!("Connecting to {}...", addr),
             Style::new().dark_gray(),
         )])?;
@@ -453,7 +453,7 @@ impl App {
         });
 
         if disconnected {
-            self.display_msg(vec![
+            self.display_msg(&[
                 ("<".to_string(), Style::new()),
                 (nick, Style::new().fg(color)),
                 ("> ".to_string(), Style::new()),
@@ -468,14 +468,14 @@ impl App {
         Ok(())
     }
 
-    fn broadcast_input_msg(&mut self, msg_type: MessageType) {
+    fn broadcast_input_msg(&mut self, msg_type: &MessageType) {
         let msg = Arc::new(self.input_buf.0.clone());
         for c in &self.connections {
             let c = c.clone();
             let m = msg.clone();
             let t = msg_type.clone();
             spawn(move || -> Result<()> {
-                send_msg(c, m, t)?;
+                send_msg(c, m, &t)?;
                 Ok(())
             });
         }
@@ -492,13 +492,13 @@ impl App {
 
     ///Adds a message to the list of messages with the current time appended to the front,
     ///also writes the message to the log if there is one
-    fn display_msg(&mut self, msg: Message) -> Result<()> {
+    fn display_msg(&mut self, msg: &[(String, Style)]) -> Result<()> {
         let time = Local::now().format("%H:%M:%S").to_string();
         let mut message = vec![
             (time, Style::new().dark_gray()),
             (" | ".to_string(), Style::new()),
         ];
-        message.extend_from_slice(&msg);
+        message.extend_from_slice(msg);
         if self.scroll_pos.get() > 0 {
             self.scroll_pos.set(self.scroll_pos.get() + 1);
         }
@@ -507,7 +507,7 @@ impl App {
     }
 
     ///Writes `msg` to `log_file` if there is one
-    fn log_msg(&self, msg: &Message) -> Result<()> {
+    fn log_msg(&self, msg: &[(String, Style)]) -> Result<()> {
         if let Some(log) = &self.log_file {
             let mut writer = BufWriter::new(log);
             let mut message = String::new();
@@ -523,11 +523,11 @@ impl App {
     }
 
     fn display_error(&mut self, error: &str) -> Result<()> {
-        self.display_msg(vec![(format!("Error: {error}"), Style::new().red())])
+        self.display_msg(&[(format!("Error: {error}"), Style::new().red())])
     }
 
-    fn display_input_msg(&mut self, msg_type: MessageType) -> Result<()> {
-        self.display_msg(vec![
+    fn display_input_msg(&mut self, msg_type: &MessageType) -> Result<()> {
+        self.display_msg(&[
             ("<".to_string(), Style::new()),
             (
                 self.nick.clone().unwrap_or_else(|| self.listen_addr.clone()),
@@ -704,7 +704,7 @@ impl Widget for &App {
     }
 }
 
-fn message_to_line(message: &Message) -> Line {
+fn message_to_line(message: &[(String, Style)]) -> Line<'_> {
     let mut line = Line::default();
     for part in message {
         line.push_span(Span::styled(&part.0, part.1));
