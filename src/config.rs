@@ -12,7 +12,7 @@ pub(crate) struct Config {
     pub(crate) listen_ports: Vec<u16>,
     pub(crate) startup_connections: Vec<String>,
     pub(crate) log_messages: bool,
-    pub(crate) log_path: String,
+    pub(crate) log_path: PathBuf,
 }
 
 impl Config {
@@ -78,7 +78,7 @@ impl Default for Config {
             listen_ports: vec![0],
             nick: None,
             log_messages: false,
-            log_path: "messenger.log".to_string(),
+            log_path: PathBuf::from("messenger.log"),
             startup_connections: vec![],
         }
     }
@@ -86,7 +86,7 @@ impl Default for Config {
 
 ///Struct for parsing command line arguments with [`clap`]
 #[derive(Parser, Debug, Clone)]
-pub(crate) struct Args {
+struct Args {
     #[arg(short, long)]
     nick: Option<String>,
     #[arg(
@@ -106,7 +106,7 @@ pub(crate) struct Args {
     #[arg(short, long, action)]
     log_messages: bool,
     #[arg(long)]
-    log_path: Option<String>,
+    log_path: Option<PathBuf>,
     #[arg(long, action)]
     no_config: bool,
     #[arg(short, long)]
