@@ -314,12 +314,45 @@ impl App {
     }
 
     fn handle_cmd(&mut self) -> Result<()> {
+        const COMMANDS: [&str; 8] = [
+            "/c,  /connect <ADDRESS>",
+            "/d,  /disconnect <NICK|ADDRESS>",
+            "/da, /disconnect_all",
+            "/h,  /help",
+            "/m,  /msg <NICK|ADDRESS> <MESSAGE>",
+            "/mf, /msg_file <NICK|ADDRESS> <FILEPATH>",
+            "/n,  /nick <NICK>",
+            "/sf, /send_file <PATH>",
+        ];
+
         self.display_input_msg(&MessageType::Command)?;
         let binding = self.input_buf.0.clone();
         let mut parts = binding.splitn(2, ' ');
         if let Some(cmd) = parts.next() {
+            let arg = if let Some(a) = parts.next() && !a.is_empty() {
+                Some(a.trim())
+            } else {
+                None
+            };
             match cmd {
-                //commands that don't have args go here
+                "/connect" | "/c" => {
+                    if let Some(a) = arg {
+                        self.connect(a.trim())?;
+                    } else {
+                        self.display_error("No address specified")?;
+                    }
+                }
+                "/disconnect" | "/d" => {
+                    if let Some(a) = arg {
+                        if let Some(addr) = self.find_peer_addr(a.trim()) {
+                            self.disconnect(&addr)?;
+                        } else {
+                            self.display_error("Failed to disconnect, no such peer")?;
+                        }
+                    } else {
+                        self.display_error("No peer specified")?;
+                    }
+                }
                 "/disconnect_all" | "/da" => {
                     let mut addrs = vec![];
                     for c in &self.connections {
@@ -328,28 +361,18 @@ impl App {
                     for addr in &addrs {
                         self.disconnect(addr)?;
                     }
-                    return Ok(());
                 }
-                _ => ()
-            }
-            if let Some(arg) = parts.next()
-                && !arg.is_empty() {
-                match cmd {
-                    "/nick" | "/n" => {
-                        let nick = arg.trim().to_string();
-                        self.nick.replace(nick);
-                        self.broadcast_input_msg(&MessageType::Command);
+                "/help" | "/h" => {
+                    for cmd in COMMANDS {
+                        self.display_msg(&[(
+                            cmd.to_string(),
+                            Style::new().dark_gray()
+                        )])?;
                     }
-                    "/connect" | "/c" => {
-                        self.connect(arg.trim())?;
-                    }
-                    "/disconnect" | "/d" => {
-                        if let Some(addr) = self.find_peer_addr(arg.trim()) {
-                            self.disconnect(&addr)?;
-                        }
-                    }
-                    "/msg" | "/m" => {
-                        let mut args = arg.splitn(2, ' ');
+                }
+                "/msg" | "/m" => {
+                    if let Some(a) = arg {
+                        let mut args = a.splitn(2, ' ');
                         if let Some(addr) = args.next()
                             && let Some(msg) = args.next() {
                             if let Some(a) = self.find_peer_addr(&addr)
@@ -365,9 +388,13 @@ impl App {
                         } else {
                             self.display_error("No message specified")?;
                         }
+                    } else {
+                        self.display_error("No peer specified")?;
                     }
-                    "/message_file" | "/mf" => {
-                        let mut args = arg.splitn(2, ' ');
+                }
+                "/msg_file" | "/mf" => {
+                    if let Some(a) = arg {
+                        let mut args = a.splitn(2, ' ');
                         if let Some(addr) = args.next()
                             && let Some(file) = args.next()
                             && !file.is_empty() {
@@ -379,21 +406,34 @@ impl App {
                                 self.display_error("Failed to send file, no such peer")?;
                             }
                         } else {
-                            self.display_error("No file specified")?;
+                            self.display_error("No path specified")?;
                         }
+                    } else {
+                        self.display_error("No peer specified")?;
                     }
-                    "/send_file" | "/sf" => {
-                        let path = Path::new(arg);
+                }
+                "/nick" | "/n" => {
+                    if let Some(a) = arg {
+                        let nick = a.trim().to_string();
+                        self.nick.replace(nick);
+                        self.broadcast_input_msg(&MessageType::Command);
+                    } else {
+                        self.display_error("No nick specified")?;
+                    }
+                }
+                "/send_file" | "/sf" => {
+                    if let Some(a) = arg {
+                        let path = Path::new(a);
                         if path.try_exists()? {
                             self.broadcast_file(&path);
                         } else {
-                            self.display_error("File does not exist")?;
+                            self.display_error("No such file")?;
                         }
+                    } else {
+                        self.display_error("No file specified")?;
                     }
-                    _ => self.display_error(&format!("Unknown command: {cmd}"))?
                 }
-            } else {
-                self.display_error("Command needs an argument")?;
+                _ => self.display_error(&format!("Unknown command: {cmd}"))?
             }
         }
 
