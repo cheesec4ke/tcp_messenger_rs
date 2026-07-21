@@ -1,32 +1,30 @@
-name: Rust
+name: rust
 
-on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+on: [push, pull_request]
 
-env:
-  CARGO_TERM_COLOR: always
+permissions: {}
 
 jobs:
-  build:
-
+  rust:
+    name: Test `cargo check/test/build` on ubuntu-latest
     runs-on: ubuntu-latest
 
+    env:
+      CARGO_TERM_COLOR: always
+
     steps:
-    - uses: actions/checkout@v4
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: ./
+        with:
+          workspaces: ./
+
+      - run: |
+          cargo check
+          cargo test
+          cargo build --release
+        working-directory: ./
