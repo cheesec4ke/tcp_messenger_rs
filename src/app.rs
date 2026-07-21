@@ -9,9 +9,8 @@ use chrono::Local;
 use color_eyre::Result;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event;
-use ratatui::crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
 use ratatui::crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers,
 };
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::prelude::{Line, Widget};
@@ -117,7 +116,7 @@ impl App {
     ///Runs [`App`] in `terminal`
     pub(crate) fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         let mut stdout = stdout();
-        ratatui::crossterm::execute!(stdout, EnableMouseCapture)?;
+        ratatui::crossterm::execute!(stdout, EnableBracketedPaste)?;
 
         let t = self.tx.clone();
         let r = self.running.clone();
@@ -144,7 +143,7 @@ impl App {
             self.update()?;
         }
 
-        ratatui::crossterm::execute!(stdout, DisableMouseCapture)?;
+        ratatui::crossterm::execute!(stdout, DisableBracketedPaste)?;
         Ok(())
     }
 
@@ -229,14 +228,51 @@ impl App {
                         self.scroll_pos.set(0);
                     }
                 }
+                KeyCode::Up => {
+                    self.scroll_pos.set(self.scroll_pos.get() + 1);
+                }
+                KeyCode::Down => {
+                    let scroll_pos = self.scroll_pos.get();
+                    if scroll_pos > 0 {
+                        self.scroll_pos.set(scroll_pos - 1);
+                    }
+                }
                 KeyCode::Left => {
-                    if self.input_buf.1 <= self.input_buf.0.len() {
+                    if self.input_buf.1 < self.input_buf.0.len() {
                         self.input_buf.1 += 1;
+                    }
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        let len = self.input_buf.0.len();
+                        let mut idx = len - self.input_buf.1;
+                        let split = self.input_buf.0.split_at(idx);
+                        if let Some(i) = split.0.rfind(|c| !char::is_whitespace(c))
+                            && let s = split.0.split_at(i + 1)
+                            && let Some(i) = s.0.rfind(char::is_whitespace)
+                        {
+                            idx = i + 1;
+                        } else {
+                            idx = 0;
+                        }
+                        self.input_buf.1 = len - idx;
                     }
                 }
                 KeyCode::Right => {
                     if self.input_buf.1 > 0 {
                         self.input_buf.1 -= 1;
+                    }
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        let len = self.input_buf.0.len();
+                        let mut idx = len - self.input_buf.1;
+                        let split = self.input_buf.0.split_at(idx);
+                        if let Some(i) = split.1.find(|c| !char::is_whitespace(c))
+                            && let s = split.1.split_at(i)
+                            && let Some(i) = s.1.find(char::is_whitespace)
+                        {
+                            idx = s.1.len() - i;
+                        } else {
+                            idx = 0;
+                        }
+                        self.input_buf.1 = idx;
                     }
                 }
                 KeyCode::Char(c) => {
@@ -253,8 +289,17 @@ impl App {
                         let idx = self.input_buf.0.len() - self.input_buf.1 - 1;
                         self.input_buf.0.remove(idx);
                     }
-                    if self.input_buf.1 > self.input_buf.0.len() {
-                        self.input_buf.1 -= 1;
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        let len = self.input_buf.0.len();
+                        let idx = len - self.input_buf.1;
+                        let mut split = self.input_buf.0.split_at(idx);
+                        split.0 = split.0.trim_end();
+                        if let Some(space_idx) = split.0.rfind(char::is_whitespace) {
+                            split.0 = split.0.split_at(space_idx + 1).0;
+                        } else {
+                            split.0 = "";
+                        }
+                        self.input_buf.0 = split.0.to_string() + split.1;
                     }
                 }
                 KeyCode::Delete => {
@@ -263,26 +308,32 @@ impl App {
                         self.input_buf.0.remove(idx);
                         self.input_buf.1 -= 1;
                     }
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        let len = self.input_buf.0.len();
+                        let idx = len - self.input_buf.1;
+                        let mut split = self.input_buf.0.split_at(idx);
+                        split.1 = split.1.trim_start();
+                        if let Some(space_idx) = split.1.find(char::is_whitespace) {
+                            split.1 = split.1.split_at(space_idx).1;
+                        } else {
+                            split.1 = "";
+                        }
+                        self.input_buf.0 = split.0.to_string() + split.1;
+                        self.input_buf.1 -= len - self.input_buf.0.len();
+                    }
                 }
                 KeyCode::Enter => {
                     self.handle_input_buffer()?;
                     self.input_buf.0.clear();
                     self.input_buf.1 = 0;
                 }
-                _ => ()
-            },
-            Event::Mouse(m) => match m.kind {
-                ScrollUp => {
-                    self.scroll_pos.set(self.scroll_pos.get() + 1);
-                }
-                ScrollDown => {
-                    let scroll_pos = self.scroll_pos.get();
-                    if scroll_pos > 0 {
-                        self.scroll_pos.set(scroll_pos - 1);
-                    }
-                }
                 _ => (),
             },
+            Event::Paste(paste) => {
+                self.input_buf
+                    .0
+                    .insert_str(self.input_buf.0.len() - self.input_buf.1, paste);
+            }
             Event::Resize(width, height) => {
                 let scroll_pos = self.scroll_pos.get();
                 //keep scroll position when resizing
