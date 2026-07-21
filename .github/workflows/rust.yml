@@ -2,19 +2,18 @@ name: rust
 
 on: [push, pull_request]
 
-permissions: {}
-
 jobs:
   rust:
-    name: Test `cargo check/test/build` on ubuntu-latest
     runs-on: ubuntu-latest
 
     env:
       CARGO_TERM_COLOR: always
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@v7
 
       - run: |
           cargo check --release
           cargo build --release
+
+      - uses: Swatinem/rust-cache@v2
