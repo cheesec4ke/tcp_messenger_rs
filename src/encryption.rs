@@ -1,5 +1,5 @@
-use chacha20poly1305::aead::Aead;
 use chacha20poly1305::aead::common::Generate;
+use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use color_eyre::Result;
 use std::io::{Read, Write};

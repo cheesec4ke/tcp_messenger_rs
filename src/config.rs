@@ -27,12 +27,10 @@ impl Config {
                 let mut config_paths = vec![PathBuf::from("tcp_messenger.toml")];
                 if let Some(dir) = home_dir() {
                     #[cfg(target_family = "unix")]
-                    config_paths.push(
-                        PathBuf::from(dir).join(".config/tcp_messenger/config.toml")
-                    );
+                    config_paths.push(PathBuf::from(dir).join(".config/tcp_messenger/config.toml"));
                     #[cfg(target_family = "windows")]
                     config_paths.push(
-                        PathBuf::from(dir).join("AppData\\Roaming\\tcp_messenger\\config.toml")
+                        PathBuf::from(dir).join("AppData\\Roaming\\tcp_messenger\\config.toml"),
                     );
                 }
                 for path in config_paths {
@@ -116,7 +114,8 @@ struct Args {
 fn read_config_file(path: &Path) -> Option<Config> {
     if let Ok(e) = fs::exists(path)
         && e
-        && let Ok(config) = fs::read_to_string(path) {
+        && let Ok(config) = fs::read_to_string(path)
+    {
         match toml::from_str::<Config>(&config) {
             Ok(config) => Some(config),
             Err(e) => {

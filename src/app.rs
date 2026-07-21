@@ -87,7 +87,8 @@ impl App {
                 fs::File::create_new(&config.log_path)?;
             }
             Some(
-                fs::OpenOptions::new().write(true)
+                fs::OpenOptions::new()
+                    .write(true)
                     .append(true)
                     .open(&config.log_path)?,
             )
@@ -129,9 +130,7 @@ impl App {
             for port in &self.config.listen_ports {
                 let addr = format!("{}:{}", ip, port);
                 let t = self.tx.clone();
-                spawn(move || -> Result<()> {
-                    connection_listener(t, &addr)
-                });
+                spawn(move || -> Result<()> { connection_listener(t, &addr) });
             }
         }
 
@@ -212,7 +211,7 @@ impl App {
                 KeyCode::PageUp => {
                     self.scroll_pos.set(
                         //-2 for the border, -2 for the input box
-                        self.scroll_pos.get() + self.terminal_size.1 as usize - 4
+                        self.scroll_pos.get() + self.terminal_size.1 as usize - 4,
                     );
                 }
                 KeyCode::PageDown => {
@@ -238,8 +237,7 @@ impl App {
                 KeyCode::Char(c) => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
                         self.running.store(false, Ordering::Relaxed);
-                    }
-                    else {
+                    } else {
                         self.input_buf
                             .0
                             .insert(self.input_buf.0.len() - self.input_buf.1, c);
@@ -278,7 +276,7 @@ impl App {
                         self.scroll_pos.set(scroll_pos - 1);
                     }
                 }
-                _ => ()
+                _ => (),
             },
             Event::Resize(width, height) => {
                 let scroll_pos = self.scroll_pos.get();
@@ -297,7 +295,7 @@ impl App {
                 }
                 self.terminal_size = (*width, *height);
             }
-            _ => ()
+            _ => (),
         }
 
         Ok(())
@@ -329,7 +327,9 @@ impl App {
         let binding = self.input_buf.0.clone();
         let mut parts = binding.splitn(2, ' ');
         if let Some(cmd) = parts.next() {
-            let arg = if let Some(a) = parts.next() && !a.is_empty() {
+            let arg = if let Some(a) = parts.next()
+                && !a.is_empty()
+            {
                 Some(a.trim())
             } else {
                 None
@@ -364,19 +364,18 @@ impl App {
                 }
                 "/help" | "/h" => {
                     for cmd in COMMANDS {
-                        self.display_msg(&[(
-                            cmd.to_string(),
-                            Style::new().dark_gray()
-                        )])?;
+                        self.display_msg(&[(cmd.to_string(), Style::new().dark_gray())])?;
                     }
                 }
                 "/msg" | "/m" => {
                     if let Some(a) = arg {
                         let mut args = a.splitn(2, ' ');
                         if let Some(addr) = args.next()
-                            && let Some(msg) = args.next() {
+                            && let Some(msg) = args.next()
+                        {
                             if let Some(a) = self.find_peer_addr(&addr)
-                                && let Some(c) = self.get_connection(&a) {
+                                && let Some(c) = self.get_connection(&a)
+                            {
                                 let m = Arc::new(msg.trim().to_string());
                                 spawn(move || -> Result<()> {
                                     send_msg(c, m, &MessageType::Text)?;
@@ -397,9 +396,11 @@ impl App {
                         let mut args = a.splitn(2, ' ');
                         if let Some(addr) = args.next()
                             && let Some(file) = args.next()
-                            && !file.is_empty() {
+                            && !file.is_empty()
+                        {
                             if let Some(a) = self.find_peer_addr(&addr)
-                                && let Some(c) = self.get_connection(&a) {
+                                && let Some(c) = self.get_connection(&a)
+                            {
                                 let p = Arc::new(PathBuf::from(file.trim()));
                                 spawn(move || -> Result<()> { send_file(c, p) });
                             } else {
@@ -433,7 +434,7 @@ impl App {
                         self.display_error("No file specified")?;
                     }
                 }
-                _ => self.display_error(&format!("Unknown command: {cmd}"))?
+                _ => self.display_error(&format!("Unknown command: {cmd}"))?,
             }
         }
 
@@ -479,7 +480,8 @@ impl App {
             if c.peer_addr == peer_addr {
                 let _ = c.stream.shutdown(Shutdown::Both);
                 color = c.peer_color.clone();
-                nick = c.peer_nick
+                nick = c
+                    .peer_nick
                     .read()
                     .unwrap()
                     .clone()
@@ -570,7 +572,9 @@ impl App {
         self.display_msg(&[
             ("<".to_string(), Style::new()),
             (
-                self.nick.clone().unwrap_or_else(|| self.listen_addr.clone()),
+                self.nick
+                    .clone()
+                    .unwrap_or_else(|| self.listen_addr.clone()),
                 Style::new().fg(self.color),
             ),
             ("> ".to_string(), Style::new()),
@@ -579,18 +583,18 @@ impl App {
                 Style::new().fg(match msg_type {
                     MessageType::Text => Color::Reset,
                     MessageType::Command => Color::Yellow,
-                    _ => Color::DarkGray
+                    _ => Color::DarkGray,
                 }),
             ),
         ])
     }
 
     fn find_peer_addr(&self, peer_nick: &str) -> Option<String> {
-        if let Some(c) = self.connections
+        if let Some(c) = self
+            .connections
             .iter()
-            .find(|c|
-                *c.peer_nick.read().unwrap() == Some(peer_nick.to_string())
-            ) {
+            .find(|c| *c.peer_nick.read().unwrap() == Some(peer_nick.to_string()))
+        {
             Some(c.peer_addr.clone())
         } else {
             None
@@ -612,16 +616,13 @@ impl App {
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let scrolling = self.scroll_pos.get() > 0;
-        let vertical_layout = Layout::vertical([
-            Constraint::Percentage(100), Constraint::Min(3)
-        ]);
+        let vertical_layout = Layout::vertical([Constraint::Percentage(100), Constraint::Min(3)]);
         let [mut message_area, input_area] = vertical_layout.areas::<2>(area);
         message_area.height += 1; //overlap borders
 
         if self.show_peers {
-            let horizontal_layout = Layout::horizontal([
-                Constraint::Percentage(75), Constraint::Percentage(25)
-            ]);
+            let horizontal_layout =
+                Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)]);
             let [mut m, peer_area] = horizontal_layout.areas::<2>(message_area);
             m.width += 1; //overlap borders
             message_area = m;
@@ -648,11 +649,14 @@ impl Widget for &App {
                     },
                 ))
             }
-            let peer_paragraph = Paragraph::new(peers).block(
-                    Block::bordered().title("─┤Peers├")
+            let peer_paragraph = Paragraph::new(peers)
+                .block(
+                    Block::bordered()
+                        .title("─┤Peers├")
                         .merge_borders(Fuzzy)
-                        .padding(Padding::horizontal(1))
-                ).wrap(Wrap { trim: false });
+                        .padding(Padding::horizontal(1)),
+                )
+                .wrap(Wrap { trim: false });
             peer_paragraph.render(peer_area, buf);
         }
 
@@ -677,8 +681,10 @@ impl Widget for &App {
         }
         let scroll_pos = self.scroll_pos.get();
 
-        let message_paragraph = Paragraph::new(messages).block(
-                Block::bordered().title("─┤Messages├")
+        let message_paragraph = Paragraph::new(messages)
+            .block(
+                Block::bordered()
+                    .title("─┤Messages├")
                     .merge_borders(Fuzzy)
                     .padding(Padding {
                         left: 1,
@@ -686,13 +692,18 @@ impl Widget for &App {
                         right: if scrolling { 2 } else { 1 },
                         top: 0,
                         bottom: 0,
-                    })
-            ).wrap(Wrap { trim: false })
+                    }),
+            )
+            .wrap(Wrap { trim: false })
             .scroll(((scroll_max - scroll_pos) as u16, 0));
 
-        let nick = self.nick.clone().unwrap_or_else(|| self.listen_addr.clone());
+        let nick = self
+            .nick
+            .clone()
+            .unwrap_or_else(|| self.listen_addr.clone());
         let input_layout = Layout::horizontal([
-            Constraint::Max(nick.len() as u16 + 5), Constraint::Fill(1)
+            Constraint::Max(nick.len() as u16 + 5),
+            Constraint::Fill(1),
             //Min(self.input_buf.0.len() as u16 + 3) would be preferable to Fill(1),
             //but causes a crash when the horizontal size is too small
         ]);
@@ -702,8 +713,11 @@ impl Widget for &App {
             Span::raw("<"),
             Span::styled(nick, Style::new().fg(self.color)),
             Span::raw(">"),
-        ])).block(
-            Block::bordered().merge_borders(Fuzzy).padding(Padding::horizontal(1))
+        ]))
+        .block(
+            Block::bordered()
+                .merge_borders(Fuzzy)
+                .padding(Padding::horizontal(1)),
         );
 
         //underline the character the cursor is on
@@ -718,10 +732,11 @@ impl Widget for &App {
             //blinking doesn't work on certain terminals
             Span::styled(second, Style::new().underlined().slow_blink()),
             Span::raw(third),
-        ])).block(
+        ]))
+        .block(
             Block::bordered()
                 .merge_borders(Fuzzy)
-                .padding(Padding::horizontal(1))
+                .padding(Padding::horizontal(1)),
         );
 
         if scrolling {
@@ -735,7 +750,7 @@ impl Widget for &App {
             scrollbar.render(
                 message_area.inner(Margin::new(1, 1)),
                 buf,
-                &mut scrollbar_state
+                &mut scrollbar_state,
             );
         }
         message_paragraph.render(message_area, buf);

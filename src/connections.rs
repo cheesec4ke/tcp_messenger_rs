@@ -64,10 +64,7 @@ impl TryFrom<u8> for MessageType {
 
 ///Starts a [`TcpListener`] on `listen_addr`
 ///and sends each incoming [`TcpStream`] to the app as a [`NewStream`] event
-pub(crate) fn connection_listener(
-    tx: Sender<AppEvent>,
-    listen_addr: &str,
-) -> Result<()> {
+pub(crate) fn connection_listener(tx: Sender<AppEvent>, listen_addr: &str) -> Result<()> {
     if let Ok(listener) = TcpListener::bind(listen_addr) {
         let local_addr = listener.local_addr()?.to_string();
         tx.send(MessageEvent(vec![(
@@ -132,7 +129,7 @@ pub(crate) fn connection_handler(
             };
             let msg_type = match MessageType::try_from(header[0]) {
                 Ok(msg_type) => msg_type,
-                _ => MessageType::Text
+                _ => MessageType::Text,
             };
             header[0] = 0;
             match msg_type {
@@ -157,7 +154,8 @@ pub(crate) fn connection_handler(
                         match cmd {
                             "/nick" | "/n" => {
                                 let peer_nick = arg.trim();
-                                connection.peer_nick
+                                connection
+                                    .peer_nick
                                     .write()
                                     .unwrap()
                                     .replace(peer_nick.to_string());
@@ -187,9 +185,8 @@ pub(crate) fn connection_handler(
                     header[0] = 0;
                     buf.resize(u64::from_be_bytes(header) as usize, 0);
                     reader.read_exact(&mut buf)?;
-                    let crc = u64::from_be_bytes(decrypt(
-                        &buf, &connection.secret
-                    )?.try_into().unwrap());
+                    let crc =
+                        u64::from_be_bytes(decrypt(&buf, &connection.secret)?.try_into().unwrap());
                     reader.read_exact(&mut header)?;
                     buf.resize(u64::from_be_bytes(header) as usize, 0);
                     reader.read_exact(&mut buf)?;
@@ -231,7 +228,7 @@ pub(crate) fn connection_handler(
                         }
                     }
                 }
-                _ => ()
+                _ => (),
             }
         }
     }
@@ -258,10 +255,7 @@ pub(crate) fn send_msg(
     Ok(())
 }
 
-pub(crate) fn send_file(
-    connection: Arc<Connection>,
-    path: Arc<PathBuf>
-) -> Result<()> {
+pub(crate) fn send_file(connection: Arc<Connection>, path: Arc<PathBuf>) -> Result<()> {
     let file = fs::File::open(path.as_path())?;
     let mut buffer = Vec::with_capacity(PIECE_SIZE as usize);
     let mut stream_writer = BufWriter::new(&connection.stream);
@@ -336,13 +330,16 @@ fn try_create_file(file_name: &str) -> Option<(fs::File, String)> {
             let p = path.to_str().unwrap();
             let mut parts = (p, "");
             let mut separator = "";
-            if !path.file_name()
+            if !path
+                .file_name()
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .rfind('.')
-                .unwrap_or(1) == 0
-                && let Some(p) = path.to_str().unwrap().rsplit_once('.') {
+                .unwrap_or(1)
+                == 0
+                && let Some(p) = path.to_str().unwrap().rsplit_once('.')
+            {
                 parts = p;
                 separator = ".";
             }
