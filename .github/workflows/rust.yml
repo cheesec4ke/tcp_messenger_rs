@@ -11,9 +11,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-
-      - run: |
-          cargo check --release
-          cargo build --release
-
       - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --verbose --release
