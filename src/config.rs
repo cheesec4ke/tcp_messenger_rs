@@ -13,6 +13,7 @@ pub(crate) struct Config {
     pub(crate) startup_connections: Vec<String>,
     pub(crate) log_messages: bool,
     pub(crate) log_path: PathBuf,
+    pub(crate) debug: bool,
 }
 
 impl Config {
@@ -64,6 +65,9 @@ impl Config {
         if let Some(a) = args.log_path {
             config.log_path = a;
         }
+        if args.debug {
+            config.debug = args.debug;
+        }
 
         config
     }
@@ -78,6 +82,7 @@ impl Default for Config {
             log_messages: false,
             log_path: PathBuf::from("messenger.log"),
             startup_connections: vec![],
+            debug: false,
         }
     }
 }
@@ -109,6 +114,8 @@ struct Args {
     no_config: bool,
     #[arg(short, long)]
     config_path: Option<PathBuf>,
+    #[arg(short, long, action)]
+    debug: bool,
 }
 
 fn read_config_file(path: &Path) -> Option<Config> {

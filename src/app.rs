@@ -24,6 +24,7 @@ use ratatui::widgets::{
 };
 use ratatui::{DefaultTerminal, Frame};
 use std::cell::Cell;
+use std::fmt::Debug;
 use std::io::{stdout, BufWriter, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
@@ -149,7 +150,11 @@ impl App {
 
     ///Updates the [`App`] state
     fn update(&mut self) -> Result<()> {
-        match self.rx.recv()? {
+        let recv = self.rx.recv()?;
+        if self.config.debug {
+            self.debug(&recv)?;
+        }
+        match recv {
             InputEvent(event) => {
                 self.handle_input(&event)?;
             }
@@ -566,6 +571,10 @@ impl App {
 
     fn display_error(&mut self, error: &str) -> Result<()> {
         self.display_msg(&[(format!("Error: {error}"), Style::new().red())])
+    }
+
+    fn debug(&mut self, d: &impl Debug) -> Result<()> {
+        self.display_msg(&[(format!("{d:?}"), Style::new().dark_gray())])
     }
 
     fn display_input_msg(&mut self, msg_type: &MessageType) -> Result<()> {
