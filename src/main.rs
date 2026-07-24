@@ -2,7 +2,6 @@ mod app;
 mod config;
 mod connections;
 mod encryption;
-mod functions;
 
 use crate::app::App;
 use crate::config::Config;

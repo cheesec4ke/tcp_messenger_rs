@@ -9,9 +9,9 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 pub(crate) fn encrypt(bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(&Key::try_from(*key)?);
     let nonce = Nonce::generate();
-    let mut encrypted = cipher.encrypt(&nonce, bytes)?;
+    let encrypted = cipher.encrypt(&nonce, bytes)?;
     let mut output = Vec::from(nonce.0);
-    output.append(&mut encrypted);
+    output.extend(encrypted);
 
     Ok(output)
 }

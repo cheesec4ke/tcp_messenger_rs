@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct Config {
-    pub(crate) nick: Option<String>,
+    pub(crate) debug: bool,
     pub(crate) listen_ips: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
-    pub(crate) startup_connections: Vec<String>,
     pub(crate) log_messages: bool,
     pub(crate) log_path: PathBuf,
-    pub(crate) debug: bool,
+    pub(crate) nick: Option<String>,
+    pub(crate) startup_connections: Vec<String>,
 }
 
 impl Config {
@@ -31,7 +31,7 @@ impl Config {
                     config_paths.push(PathBuf::from(dir).join(".config/tcp_messenger/config.toml"));
                     #[cfg(target_family = "windows")]
                     config_paths.push(
-                        PathBuf::from(dir).join("AppData\\Roaming\\tcp_messenger\\config.toml"),
+                        PathBuf::from(dir).join("AppData\\Roaming\\tcp_messenger\\config.toml")
                     );
                 }
                 for path in config_paths {
@@ -47,8 +47,8 @@ impl Config {
         }
 
         //would be nice to have a function to do this instead
-        if let Some(a) = args.nick {
-            config.nick = Some(a);
+        if args.debug {
+            config.debug = args.debug;
         }
         if let Some(a) = args.listen_ips {
             config.listen_ips = a;
@@ -56,17 +56,17 @@ impl Config {
         if let Some(a) = args.listen_ports {
             config.listen_ports = a;
         }
-        if let Some(a) = args.startup_connections {
-            config.startup_connections = a;
-        }
         if args.log_messages {
             config.log_messages = args.log_messages;
         }
         if let Some(a) = args.log_path {
             config.log_path = a;
         }
-        if args.debug {
-            config.debug = args.debug;
+        if let Some(a) = args.nick {
+            config.nick = Some(a);
+        }
+        if let Some(a) = args.startup_connections {
+            config.startup_connections = a;
         }
 
         config
@@ -76,13 +76,13 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            debug: false,
             listen_ips: vec!["all".to_string()],
             listen_ports: vec![0],
-            nick: None,
             log_messages: false,
             log_path: PathBuf::from("messenger.log"),
-            startup_connections: vec![],
-            debug: false,
+            nick: None,
+            startup_connections: vec![]
         }
     }
 }
@@ -91,7 +91,9 @@ impl Default for Config {
 #[derive(Parser, Debug, Clone)]
 struct Args {
     #[arg(short, long)]
-    nick: Option<String>,
+    config_path: Option<PathBuf>,
+    #[arg(short, long, action)]
+    debug: bool,
     #[arg(
         short = 'i', long,
         num_args = 1..,
@@ -104,25 +106,20 @@ struct Args {
         value_delimiter = ',',
     )]
     listen_ports: Option<Vec<u16>>,
-    #[arg(short, long, num_args = 1.., value_delimiter = ',')]
-    startup_connections: Option<Vec<String>>,
     #[arg(short, long, action)]
     log_messages: bool,
     #[arg(long)]
     log_path: Option<PathBuf>,
-    #[arg(long, action)]
-    no_config: bool,
+    #[arg(short, long, num_args = 1.., value_delimiter = ',')]
+    startup_connections: Option<Vec<String>>,
     #[arg(short, long)]
-    config_path: Option<PathBuf>,
-    #[arg(short, long, action)]
-    debug: bool,
+    nick: Option<String>,
+    #[arg(long, action)]
+    no_config: bool
 }
 
 fn read_config_file(path: &Path) -> Option<Config> {
-    if let Ok(e) = fs::exists(path)
-        && e
-        && let Ok(config) = fs::read_to_string(path)
-    {
+    if let Ok(e) = fs::exists(path) && e && let Ok(config) = fs::read_to_string(path) {
         match toml::from_str::<Config>(&config) {
             Ok(config) => Some(config),
             Err(e) => {
