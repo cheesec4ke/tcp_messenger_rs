@@ -83,7 +83,7 @@ pub(crate) struct App<'a> {
     downloads: Vec<Download>,
     handles: Vec<JoinHandle<Result<()>>>,
     ///`(input, selection index)`
-    input_buf: (String, usize),
+    input_buf: (Vec<char>, usize),
     log_file: Option<fs::File>,
     listen_addr: String,
     messages: Vec<Line<'a>>,
@@ -114,7 +114,7 @@ impl App<'static> {
             connections: vec![],
             downloads: vec![],
             handles: vec![],
-            input_buf: (String::new(), 0),
+            input_buf: (vec![], 0),
             listen_addr,
             log_file,
             messages: vec![],
@@ -270,9 +270,9 @@ impl App<'static> {
                         let len = self.input_buf.0.len();
                         let mut idx = len - self.input_buf.1;
                         let split = self.input_buf.0.split_at(idx);
-                        if let Some(i) = split.0.rfind(|c| !char::is_whitespace(c))
+                        if let Some(i) = split.0.iter().rposition(|c| !char::is_whitespace(*c))
                             && let s = split.0.split_at(i + 1)
-                            && let Some(i) = s.0.rfind(char::is_whitespace) {
+                            && let Some(i) = s.0.iter().rposition(|c| c.is_whitespace()) {
                             idx = i + 1;
                         } else {
                             idx = 0;
@@ -288,9 +288,9 @@ impl App<'static> {
                         let len = self.input_buf.0.len();
                         let mut idx = len - self.input_buf.1;
                         let split = self.input_buf.0.split_at(idx);
-                        if let Some(i) = split.1.find(|c| !char::is_whitespace(c))
+                        if let Some(i) = split.1.iter().position(|c| !c.is_whitespace())
                             && let s = split.1.split_at(i)
-                            && let Some(i) = s.1.find(char::is_whitespace) {
+                            && let Some(i) = s.1.iter().position(|c| c.is_whitespace()) {
                             idx = s.1.len() - i;
                         } else {
                             idx = 0;
@@ -314,13 +314,19 @@ impl App<'static> {
                         let len = self.input_buf.0.len();
                         let idx = len - self.input_buf.1;
                         let mut split = self.input_buf.0.split_at(idx);
-                        split.0 = split.0.trim_end();
-                        if let Some(space_idx) = split.0.rfind(char::is_whitespace) {
+                        if let Some(char_idx) = split.0.iter().rposition(|c| !c.is_whitespace()) {
+                            split.0 = split.0.split_at(char_idx + 1).0;
+                        } else {
+                            split.0 = &[];
+                        }
+                        if let Some(space_idx) = split.0.iter().rposition(|c| c.is_whitespace()) {
                             split.0 = split.0.split_at(space_idx + 1).0;
                         } else {
-                            split.0 = "";
+                            split.0 = &[];
                         }
-                        self.input_buf.0 = split.0.to_string() + split.1;
+                        let mut buf = split.0.to_vec();
+                        buf.extend_from_slice(split.1);
+                        self.input_buf.0 = buf;
                     }
                 }
                 KeyCode::Delete => {
@@ -333,13 +339,19 @@ impl App<'static> {
                         let len = self.input_buf.0.len();
                         let idx = len - self.input_buf.1;
                         let mut split = self.input_buf.0.split_at(idx);
-                        split.1 = split.1.trim_start();
-                        if let Some(space_idx) = split.1.find(char::is_whitespace) {
+                        if let Some(char_idx) = split.1.iter().position(|c| !c.is_whitespace()) {
+                            split.1 = split.1.split_at(char_idx).1;
+                        } else {
+                            split.1 = &[];
+                        }
+                        if let Some(space_idx) = split.1.iter().position(|c| c.is_whitespace()) {
                             split.1 = split.1.split_at(space_idx).1;
                         } else {
-                            split.1 = "";
+                            split.1 = &[];
                         }
-                        self.input_buf.0 = split.0.to_string() + split.1;
+                        let mut buf = split.0.to_vec();
+                        buf.extend_from_slice(split.1);
+                        self.input_buf.0 = buf;
                         self.input_buf.1 -= len - self.input_buf.0.len();
                     }
                 }
@@ -351,7 +363,12 @@ impl App<'static> {
                 _ => ()
             }
             Event::Paste(paste) => {
-                self.input_buf.0.insert_str(self.input_buf.0.len() - self.input_buf.1, paste);
+                let idx = self.input_buf.0.len() - self.input_buf.1;
+                let (l, r) = self.input_buf.0.split_at(idx);
+                let mut buf = l.to_vec();
+                buf.extend_from_slice(paste.chars().collect::<Vec<_>>().as_slice());
+                buf.extend_from_slice(r);
+                self.input_buf.0 = buf;
             }
             Event::Resize(width, height) => {
                 let scroll_pos = self.scroll_pos.get();
@@ -377,12 +394,11 @@ impl App<'static> {
     }
 
     fn handle_input_buffer(&mut self) -> Result<()> {
-        match self.input_buf {
-            _ if self.input_buf.0.starts_with('/') => self.handle_cmd(),
-            _ => {
-                self.broadcast_input_msg(&MessageType::Text);
-                self.display_input_msg(&MessageType::Text)
-            }
+        if self.input_buf.0.starts_with(&['/']) {
+            self.handle_cmd()
+        } else {
+            self.broadcast_input_msg(&MessageType::Text);
+            self.display_input_msg(&MessageType::Text)
         }
     }
 
@@ -399,7 +415,7 @@ impl App<'static> {
         ];
 
         self.display_input_msg(&MessageType::Command)?;
-        let binding = self.input_buf.0.clone();
+        let binding: String = self.input_buf.0.clone().into_iter().collect();
         let mut parts = binding.splitn(2, ' ');
         if let Some(cmd) = parts.next() {
             let arg = if let Some(a) = parts.next() && !a.is_empty() {
@@ -572,7 +588,7 @@ impl App<'static> {
     }
 
     fn broadcast_input_msg(&mut self, msg_type: &MessageType) {
-        let msg = Arc::new(self.input_buf.0.clone());
+        let msg = Arc::new(self.input_buf.0.clone().into_iter().collect::<String>());
         for c in &self.connections {
             let c = c.clone();
             let m = msg.clone();
@@ -637,7 +653,7 @@ impl App<'static> {
             ),
             Span::raw("> "),
             Span::styled(
-                self.input_buf.0.clone(),
+                self.input_buf.0.clone().into_iter().collect::<String>(),
                 match msg_type {
                     MessageType::Text => Style::new(),
                     MessageType::Command => COMMAND,
@@ -764,10 +780,10 @@ impl Widget for &App<'static> {
         let (second, third) = second.split_at(1);
 
         let input = Paragraph::new(Line::from(vec![
-            Span::raw(first),
+            Span::raw(first.into_iter().collect::<String>()),
             //blinking doesn't work on certain terminals
-            Span::styled(second, Style::new().underlined().slow_blink()),
-            Span::raw(third),
+            Span::styled(second.into_iter().collect::<String>(), Style::new().underlined().slow_blink()),
+            Span::raw(third.into_iter().collect::<String>()),
         ])).block(Block::bordered().merge_borders(Fuzzy).padding(Padding::horizontal(1)));
 
         if scrolling {
