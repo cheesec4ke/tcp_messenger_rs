@@ -105,7 +105,7 @@ impl App<'static> {
             if !fs::exists(&config.log_path)? {
                 fs::File::create_new(&config.log_path)?;
             }
-            Some(fs::OpenOptions::new().write(true).append(true).open(&config.log_path)?)
+            Some(fs::OpenOptions::new().append(true).open(&config.log_path)?)
         } else {
             None
         };
@@ -156,7 +156,7 @@ impl App<'static> {
         }
 
         while self.running.load(Ordering::Relaxed) {
-            terminal.draw(|mut frame| self.render(&mut frame))?;
+            terminal.draw(|frame| self.render(frame))?;
             self.update()?;
         }
 
@@ -224,7 +224,8 @@ impl App<'static> {
                 send_msg(c, Arc::new(format!("/n {n}")), &MessageType::Command)
             }));
         }
-        Ok(self.connections.push(connection))
+        self.connections.push(connection);
+        Ok(())
     }
 
     ///Handles [crossterm] events, currently only key presses
@@ -460,7 +461,7 @@ impl App<'static> {
                     if let Some(a) = arg {
                         let mut args = a.splitn(2, ' ');
                         if let Some(addr) = args.next() && let Some(msg) = args.next() {
-                            if let Some(a) = self.find_peer_addr(&addr)
+                            if let Some(a) = self.find_peer_addr(addr)
                                 && let Some(c) = self.get_connection(&a) {
                                 let m = Arc::new(msg.trim().to_string());
                                 self.handles.push(spawn(move || -> Result<()> {
@@ -482,7 +483,7 @@ impl App<'static> {
                         if let Some(addr) = args.next()
                             && let Some(file) = args.next()
                             && !file.is_empty() {
-                            if let Some(a) = self.find_peer_addr(&addr)
+                            if let Some(a) = self.find_peer_addr(addr)
                                 && let Some(c) = self.get_connection(&a) {
                                 let p = Arc::new(PathBuf::from(file.trim()));
                                 self.handles.push(spawn(move || -> Result<()> { send_file(c, p) }));
@@ -509,7 +510,7 @@ impl App<'static> {
                     if let Some(a) = arg {
                         let path = Path::new(a);
                         if path.try_exists()? {
-                            self.broadcast_file(&path);
+                            self.broadcast_file(path);
                         } else {
                             self.display_error("No such file")?;
                         }
@@ -592,7 +593,7 @@ impl App<'static> {
         for c in &self.connections {
             let c = c.clone();
             let m = msg.clone();
-            let t = msg_type.clone();
+            let t = *msg_type;
             self.handles.push(spawn(move || -> Result<()> { send_msg(c, m, &t) }));
         }
     }
@@ -664,13 +665,9 @@ impl App<'static> {
     }
 
     fn find_peer_addr(&self, peer_nick: &str) -> Option<String> {
-        if let Some(c) = self.connections.iter().find(
+        self.connections.iter().find(
             |c| *c.peer_nick.read().unwrap() == Some(peer_nick.to_string())
-        ) {
-            Some(c.peer_addr.clone())
-        } else {
-            None
-        }
+        ).map(|c| c.peer_addr.clone())
     }
 
     fn get_connection(&self, peer_addr: &str) -> Option<Arc<Connection>> {
@@ -780,10 +777,10 @@ impl Widget for &App<'static> {
         let (second, third) = second.split_at(1);
 
         let input = Paragraph::new(Line::from(vec![
-            Span::raw(first.into_iter().collect::<String>()),
+            Span::raw(first.iter().collect::<String>()),
             //blinking doesn't work on certain terminals
-            Span::styled(second.into_iter().collect::<String>(), Style::new().underlined().slow_blink()),
-            Span::raw(third.into_iter().collect::<String>()),
+            Span::styled(second.iter().collect::<String>(), Style::new().underlined().slow_blink()),
+            Span::raw(third.iter().collect::<String>()),
         ])).block(Block::bordered().merge_borders(Fuzzy).padding(Padding::horizontal(1)));
 
         if scrolling {

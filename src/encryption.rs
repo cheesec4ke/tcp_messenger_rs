@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 pub(crate) fn encrypt(bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new(&Key::try_from(*key)?);
+    let cipher = ChaCha20Poly1305::new(&Key::from(*key));
     let nonce = Nonce::generate();
     let encrypted = cipher.encrypt(&nonce, bytes)?;
     let mut output = Vec::from(nonce.0);
@@ -17,7 +17,7 @@ pub(crate) fn encrypt(bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn decrypt(bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new(&Key::try_from(*key)?);
+    let cipher = ChaCha20Poly1305::new(&Key::from(*key));
     //get the first 12 bytes as a sized array, needed for conversion
     let n = [
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],

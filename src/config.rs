@@ -28,7 +28,7 @@ impl Config {
                 let mut config_paths = vec![PathBuf::from("tcp_messenger.toml")];
                 if let Some(dir) = home_dir() {
                     #[cfg(target_family = "unix")]
-                    config_paths.push(PathBuf::from(dir).join(".config/tcp_messenger/config.toml"));
+                    config_paths.push(dir.join(".config/tcp_messenger/config.toml"));
                     #[cfg(target_family = "windows")]
                     config_paths.push(
                         PathBuf::from(dir).join("AppData\\Roaming\\tcp_messenger\\config.toml")

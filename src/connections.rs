@@ -82,7 +82,7 @@ impl TryFrom<u8> for MessageType {
             254 => Ok(Self::File),
             253 => Ok(Self::Image),
             252 => Ok(Self::Command),
-            _ => Err(Self::Error::default())
+            _ => Err(())
         }
     }
 }
@@ -96,10 +96,8 @@ pub(crate) fn connection_listener(tx: Sender<AppEvent>, listen_addr: &str) -> Re
             format!("Listening on {local_addr}..."), INFO
         ))))?;
         tx.send(ListenEvent(local_addr.clone()))?;
-        for stream in listener.incoming() {
-            if let Ok(s) = stream {
-                tx.send(NewStream(s))?;
-            }
+        for s in listener.incoming().flatten() {
+            tx.send(NewStream(s))?;
         }
     } else {
         tx.send(ErrorEvent(format!(
@@ -141,7 +139,7 @@ pub(crate) fn connection_handler(
     tx.send(ConnectionEvent(connection.clone()))?;
 
     while running.load(Ordering::Relaxed) {
-        if let Err(_) = reader.read_exact(&mut header) {
+        if reader.read_exact(&mut header).is_err() {
             tx.send(DisconnectionEvent(connection.peer_addr.clone()))?;
             return Ok(());
         } else {
@@ -199,7 +197,7 @@ pub(crate) fn connection_handler(
 
                     if let Some((mut file, new_path)) = try_create_file(&file_name) {
                         let mut buf_writer = BufWriter::new(&mut file);
-                        let pieces = (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+                        let pieces = file_size.div_ceil(PIECE_SIZE);
                         let mut progress = 0;
                         let download_id = fastrand::u64(..);
                         tx.send(DownloadEvent(Download {
@@ -293,7 +291,7 @@ pub(crate) fn send_file(connection: Arc<Connection>, path: Arc<PathBuf>) -> Resu
     stream_writer.write_all(&enc_name)?;
 
     //encrypt and send each piece
-    let pieces = (file_size + PIECE_SIZE - 1) / PIECE_SIZE;
+    let pieces = file_size.div_ceil(PIECE_SIZE);
     for _piece in 0..pieces {
         buffer.clear();
         file_reader.take(PIECE_SIZE).read_to_end(&mut buffer)?;
@@ -308,7 +306,7 @@ pub(crate) fn send_file(connection: Arc<Connection>, path: Arc<PathBuf>) -> Resu
     Ok(())
 }
 
-fn generate_header(msg: &Vec<u8>, msg_type: &MessageType) -> [u8; 8] {
+fn generate_header(msg: &[u8], msg_type: &MessageType) -> [u8; 8] {
     let mut header: [u8; 8] = msg.len().to_be_bytes();
     header[0] = *msg_type as u8;
     header
@@ -332,7 +330,7 @@ pub(crate) fn local_ipv4_addrs() -> Vec<String> {
 ///and returns the file and new name if successful
 fn try_create_file(file_name: &str) -> Option<(fs::File, String)> {
     let path = Path::new(file_name);
-    if let Ok(f) = fs::File::create_new(&path) {
+    if let Ok(f) = fs::File::create_new(path) {
         Some((f, path.to_str().unwrap().to_string()))
     } else {
         for n in 1..usize::MAX {
